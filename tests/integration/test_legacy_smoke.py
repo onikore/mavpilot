@@ -1,3 +1,4 @@
+"""Smoke test inherited from v0.1.0: just verify mock connect/close lifecycle."""
 import asyncio
 
 
