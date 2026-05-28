@@ -70,3 +70,13 @@ def test_publish_normal_event_unchanged():
     v.publish(payload)
     parsed = json.loads(_drain(sink)[0])
     assert parsed == payload
+
+
+def test_viz_server_default_host_is_localhost():
+    v = VizServer(port=0)
+    assert v.host == "127.0.0.1"
+
+
+def test_viz_server_explicit_host_passed_through():
+    v = VizServer(host="0.0.0.0", port=0)
+    assert v.host == "0.0.0.0"

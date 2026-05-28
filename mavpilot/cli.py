@@ -42,6 +42,13 @@ async def main():
     parser.add_argument("--viz-port", type=int, default=8765)
     parser.add_argument("--no-viz", action="store_true", help="Disable browser visualization")
     parser.add_argument(
+        "--viz-host", default="127.0.0.1",
+        help=(
+            "Interface VizServer binds to (default: 127.0.0.1 — localhost-only). "
+            "Use 0.0.0.0 to expose on LAN (telemetry will be visible to anyone on the network)."
+        ),
+    )
+    parser.add_argument(
         "--precision-land", action="store_true",
         help="Use precision landing with simulated marker instead of regular land.",
     )
@@ -64,6 +71,7 @@ async def main():
         loop_hz=50.0,
         enable_viz=not args.no_viz,
         viz_port=args.viz_port,
+        viz_host=args.viz_host,
         mock=args.mock,
     )
 

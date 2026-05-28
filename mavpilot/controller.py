@@ -54,6 +54,7 @@ class DroneController:
         loop_hz: float = 50.0,
         enable_viz: bool = True,
         viz_port: int = 8765,
+        viz_host: str = "127.0.0.1",
         mock: bool = False,
         yaw_slew_rate_deg: float = 15.0,
     ):
@@ -109,7 +110,9 @@ class DroneController:
             "last_ack": None,
         }
 
-        self._viz: Optional[VizServer] = VizServer(viz_port) if enable_viz else None
+        self._viz: Optional[VizServer] = (
+            VizServer(port=viz_port, host=viz_host) if enable_viz else None
+        )
         self._viz_publisher_task_handle: Optional[asyncio.Task] = None
 
         self._shutdown_requested = False

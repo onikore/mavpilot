@@ -38,8 +38,9 @@ class VizServer:
     Open http://localhost:<port> while the drone is running.
     """
 
-    def __init__(self, port: int = 8765):
+    def __init__(self, port: int = 8765, host: str = "127.0.0.1"):
         self.port = port
+        self.host = host
         self._clients_lock = threading.Lock()
         self._clients: list[queue.Queue] = []
         self._server: Optional[ThreadingHTTPServer] = None
@@ -115,7 +116,7 @@ class VizServer:
             def log_message(self, format, *args):  # noqa: A002
                 pass
 
-        self._server = ThreadingHTTPServer(("0.0.0.0", self.port), Handler)
+        self._server = ThreadingHTTPServer((self.host, self.port), Handler)
         self._server.daemon_threads = True
         self._server_thread = threading.Thread(
             target=self._server.serve_forever,
