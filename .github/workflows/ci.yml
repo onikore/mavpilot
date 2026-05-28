@@ -1,8 +1,19 @@
-name: CI
+name: CI & Publish
 
-on: [push, pull_request]
+# Запускаемся на пуши, пулл-реквесты и на создание тегов (чтобы ловить релизы)
+on:
+  push:
+    branches: [ "main", "master" ]
+    tags:
+      - 'v*' # Сработает, если на гитхабе создать тег, например, v1.0.0 или v0.1.2
+  pull_request:
+    branches: [ "main", "master" ]
+
+permissions:
+  contents: read
 
 jobs:
+  # Твоя существующая задача тестирования (оставляем как есть)
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -24,3 +35,34 @@ jobs:
         run: mypy mavpilot/ --ignore-missing-imports
       - name: Run tests
         run: pytest -q
+
+  # Новая задача для публикации на PyPI
+  publish:
+    name: Publish to PyPI
+    needs: test # Деплой начнется ТОЛЬКО если все тесты на всех версиях Python прошли успешно
+    runs-on: ubuntu-latest
+    # Запускаем эту джобу только в том случае, если триггером послужил пуш тега (релиз)
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    
+    permissions:
+      id-token: write # Важно для беспарольного Trusted Publishing
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install build
+
+      - name: Build package
+        run: python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
