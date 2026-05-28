@@ -4,7 +4,6 @@ import asyncio
 import logging
 import math
 import signal
-import sys
 from typing import Optional
 
 from .controller import DroneController

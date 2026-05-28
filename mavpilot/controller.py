@@ -5,7 +5,6 @@ incoming MAVLink messages, and offboard setpoint streaming. The asyncio
 event loop runs user mission code on top.
 """
 import asyncio
-import json
 import logging
 import math
 import struct
@@ -15,9 +14,18 @@ from typing import Callable, Optional
 
 from pymavlink import mavutil
 
-from .constants import *
+from .constants import (
+    ACK_RESULT_NAMES,
+    DEFAULT_POS_TYPE_MASK,
+    PX4_CUSTOM_MAIN_MODE_AUTO,
+    PX4_CUSTOM_MAIN_MODE_OFFBOARD,
+    PX4_CUSTOM_SUB_MODE_AUTO_LAND,
+    PX4_CUSTOM_SUB_MODE_AUTO_LOITER,
+    PX4_CUSTOM_SUB_MODE_AUTO_RTL,
+    PX4_CUSTOM_SUB_MODE_AUTO_TAKEOFF,
+)
 from .types import Position, MarkerObservation
-from .utils import int_to_float_bits, body_to_ned, ned_to_body
+from .utils import int_to_float_bits, body_to_ned
 from .viz import VizServer
 
 logger = logging.getLogger("drone")
