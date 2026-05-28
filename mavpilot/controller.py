@@ -1115,21 +1115,67 @@ class DroneController:
         logger.warning("RTL timeout")
         return False
 
-    async def emergency_land(self):
-        """Best-effort land. Sends flight termination if land fails."""
+    async def emergency_land(self) -> None:
+        """Best-effort land. Chains AUTO_LAND → MAV_CMD_NAV_LAND → FLIGHT_TERMINATION.
+
+        Semantics: "land NOW, where the drone currently is". Intentionally
+        does NOT attempt RTL — that's a separate concern handled by
+        return_to_launch(). A failed AUTO_LAND signals a serious problem
+        (loss of comm, EKF fail) under which RTL is even less likely to
+        succeed.
+
+        Phase 2 wiring: this method intentionally IGNORES the
+        _watchdog_tripped flag. The flag is set when telemetry is lost; the
+        watchdog's job is precisely to surface an error that callers handle
+        by invoking emergency_land. If emergency_land also raised on the
+        flag, the safety path would self-cancel.
+        """
         logger.error("EMERGENCY LAND")
         self._viz_publish_command("emergency_land")
+
+        # Step 1: try AUTO_LAND mode change + wait up to 10s for touchdown.
         try:
-            await self.land(timeout_s=60.0)
+            landed = await self.land(timeout_s=10.0)
         except Exception as e:
-            logger.error(f"Emergency land failed: {e}")
-            if not self._mock and self.mav is not None:
+            logger.error(f"land() raised during emergency_land: {e}")
+            landed = False
+
+        if landed or not self.is_armed():
+            return
+
+        # Step 2: AUTO_LAND timed out. Try MAV_CMD_NAV_LAND directly
+        # (sometimes accepted when the mode-switch is stuck).
+        if not self._mock and self.mav is not None:
+            logger.warning("AUTO_LAND timed out — sending MAV_CMD_NAV_LAND command")
+            try:
+                with self._mav_lock:
+                    self.mav.mav.command_long_send(
+                        self.target_system, self.target_component,
+                        mavutil.mavlink.MAV_CMD_NAV_LAND,
+                        0, 0, 0, 0, 0, 0, 0, 0,
+                    )
+            except Exception as e:
+                logger.error(f"NAV_LAND command send failed: {e}")
+
+        # Wait 5 s for landing to happen via the command.
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if self.landed_state() == 1 or not self.is_armed():
+                return
+            await asyncio.sleep(0.2)
+
+        # Step 3: still in the air. Last resort — flight termination.
+        if not self._mock and self.mav is not None:
+            logger.error("Land and NAV_LAND both timed out — sending DO_FLIGHTTERMINATION")
+            try:
                 with self._mav_lock:
                     self.mav.mav.command_long_send(
                         self.target_system, self.target_component,
                         mavutil.mavlink.MAV_CMD_DO_FLIGHTTERMINATION,
                         0, 1, 0, 0, 0, 0, 0, 0,
                     )
+            except Exception as e:
+                logger.error(f"DO_FLIGHTTERMINATION send failed: {e}")
 
     def _viz_publish_command(self, command: str, **payload):
         if self._viz is None:
