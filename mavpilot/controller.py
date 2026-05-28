@@ -1037,7 +1037,9 @@ class DroneController:
         start = time.time()
         while time.time() - start < timeout_s:
             await asyncio.sleep(0.5)
-            if self.landed_state() == 1 or not self.is_armed():
+            # Must be ON_GROUND AND disarmed. Disarm-in-air without landing is
+            # a kill-switch / failsafe; the vehicle is NOT at the launch site.
+            if self.landed_state() == 1 and not self.is_armed():
                 logger.info("RTL complete")
                 return True
         logger.warning("RTL timeout")
