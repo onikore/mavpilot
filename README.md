@@ -109,12 +109,17 @@ async def mission():
     drone = DroneController(mock=True, enable_viz=False)
     await drone.connect()
     await drone.takeoff(altitude_m=10.0)
-    await drone.precision_land(
+    result = await drone.precision_land(
         get_marker_offset=get_marker,
         descent_rate_mps=0.3,
         final_altitude_m=0.5,
         horizontal_tolerance_m=0.15,
+        min_altitude_floor_m=0.3,   # новый параметр в v0.2.0
     )
+    if not result:
+        # status ∈ {ABORTED_AT_FLOOR, MARKER_LOST, TIMEOUT}
+        print(f"precision_land не приземлился: {result.status.value}")
+        print(f"финальная позиция: {result.final_position}")
     drone.close()
 ```
 
@@ -144,10 +149,18 @@ python -m mavpilot [ОПЦИИ]
   --connection STR      MAVLink endpoint  [по умолчанию: udp:127.0.0.1:14540]
   --mock                Симуляторный режим без железа
   --viz-port INT        Порт браузерной визуализации  [по умолчанию: 8765]
+  --viz-host STR        Интерфейс визуализатора [по умолчанию: 127.0.0.1]
+                        Используйте 0.0.0.0 для доступа из локальной сети
   --no-viz              Отключить браузерную визуализацию
   --precision-land      Точная посадка с симулированным маркером
   --pattern {square,star}  Паттерн полёта в демо  [по умолчанию: square]
 ```
+
+### Поведение при ошибках и Ctrl-C
+
+- **Ctrl-C** в любой момент миссии вызывает `emergency_land()`. Это включает: смену режима на `AUTO_LAND`, ожидание касания земли (до 10 с), отправку команды `MAV_CMD_NAV_LAND` если режим завис, и в крайнем случае `DO_FLIGHTTERMINATION` (мгновенное обесточивание моторов — дрон падает).
+- **RTL не входит в `emergency_land()`**. Возврат на точку старта — это отдельная штатная операция (`drone.return_to_launch()`), не аварийная.
+- Любое необработанное исключение в миссии (включая `KeyboardInterrupt`) также вызывает `emergency_land()`.
 
 ---
 
@@ -182,9 +195,9 @@ DroneController(
 | `await set_yaw(yaw_deg, timeout_s)` | Разворот на месте |
 | `await hover(duration_s)` | Удерживать позицию |
 | `await land(timeout_s)` | AUTO_LAND, ждать приземления |
-| `await precision_land(callback, …)` | Визуально-направляемый спуск |
+| `await precision_land(callback, …)` | Визуально-направляемый спуск; возвращает `PrecisionLandResult` |
 | `await return_to_launch(timeout_s)` | AUTO_RTL, ждать приземления |
-| `await emergency_land()` | Аварийная посадка + flight termination как fallback |
+| `await emergency_land()` | Цепочка: AUTO_LAND → NAV_LAND → DO_FLIGHTTERMINATION |
 | `close()` | Остановить все потоки, закрыть соединение |
 
 ### Телеметрия

@@ -109,12 +109,17 @@ async def mission():
     drone = DroneController(mock=True, enable_viz=False)
     await drone.connect()
     await drone.takeoff(altitude_m=10.0)
-    await drone.precision_land(
+    result = await drone.precision_land(
         get_marker_offset=get_marker,
         descent_rate_mps=0.3,
         final_altitude_m=0.5,
         horizontal_tolerance_m=0.15,
+        min_altitude_floor_m=0.3,   # new in v0.2.0
     )
+    if not result:
+        # status ∈ {ABORTED_AT_FLOOR, MARKER_LOST, TIMEOUT}
+        print(f"precision_land did not land cleanly: {result.status.value}")
+        print(f"final position: {result.final_position}")
     drone.close()
 ```
 
@@ -144,10 +149,18 @@ Options:
   --connection STR      MAVLink endpoint  [default: udp:127.0.0.1:14540]
   --mock                Hardware-free simulator mode
   --viz-port INT        Browser visualization port  [default: 8765]
+  --viz-host STR        Interface the visualization server binds to  [default: 127.0.0.1]
+                        Use 0.0.0.0 to expose on LAN (telemetry visible to everyone on the network)
   --no-viz              Disable browser visualization
   --precision-land      Use precision landing with a simulated marker
   --pattern {square,star}  Demo flight pattern  [default: square]
 ```
+
+### Error handling and Ctrl-C
+
+- **Ctrl-C** at any point during a mission calls `emergency_land()`. This chains: `AUTO_LAND` mode switch, wait up to 10 s for touchdown, send `MAV_CMD_NAV_LAND` if mode switch is stuck, and as a last resort `DO_FLIGHTTERMINATION` (immediate motor cut — drone falls).
+- **RTL is not part of `emergency_land()`**. Return-to-launch is a separate nominal operation (`drone.return_to_launch()`), not an emergency procedure.
+- Any unhandled exception in the mission body (including `KeyboardInterrupt`) also triggers `emergency_land()`.
 
 ---
 
@@ -182,9 +195,9 @@ DroneController(
 | `await set_yaw(yaw_deg, timeout_s)` | Rotate in-place |
 | `await hover(duration_s)` | Hold position |
 | `await land(timeout_s)` | Switch to AUTO_LAND, wait until on ground |
-| `await precision_land(callback, …)` | Vision-guided descent |
+| `await precision_land(callback, …)` | Vision-guided descent; returns `PrecisionLandResult` |
 | `await return_to_launch(timeout_s)` | Switch to AUTO_RTL, wait until landed |
-| `await emergency_land()` | Best-effort land + flight termination fallback |
+| `await emergency_land()` | Chain: AUTO_LAND → NAV_LAND → DO_FLIGHTTERMINATION |
 | `close()` | Stop all threads and close connection |
 
 ### Telemetry
