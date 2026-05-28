@@ -19,17 +19,16 @@ def pixel_to_body_offset(
 ) -> Tuple[float, float]:
     """Convert normalized pixel offset to body offset in meters.
 
-    Assumes downward-facing camera and pinhole model.
-    Returns (dx, dy) in body FRD frame (meters).
+    Pinhole camera model. ``px_norm_x``/``px_norm_y`` are in ``[-1, 1]`` where
+    ``±1`` is the image edge. Returns (dx, dy) in body FRD frame (meters),
+    assuming a downward-facing camera.
     """
     half_h = math.radians(camera_hfov_deg / 2.0)
     half_v = math.radians(camera_vfov_deg / 2.0)
 
-    ang_x = px_norm_x * half_h
-    ang_y = px_norm_y * half_v
-
-    dy_cam = altitude_above_ground_m * math.tan(ang_x)
-    dx_cam = -altitude_above_ground_m * math.tan(ang_y)
+    # Pinhole: ground-plane offset = altitude * px_norm * tan(half_fov)
+    dy_cam = altitude_above_ground_m * px_norm_x * math.tan(half_h)
+    dx_cam = -altitude_above_ground_m * px_norm_y * math.tan(half_v)
 
     cy = math.cos(math.radians(camera_mount_yaw_deg))
     sy = math.sin(math.radians(camera_mount_yaw_deg))
