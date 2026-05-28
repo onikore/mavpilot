@@ -12,6 +12,25 @@ logger = logging.getLogger("drone")
 _VIZ_HTML_PATH = os.path.join(os.path.dirname(__file__), "_viz.html")
 
 
+def _sanitize_for_json(obj):
+    """Recursively replace NaN/±Inf floats with None so json.dumps(allow_nan=False) succeeds.
+
+    Browsers' JSON.parse rejects bare NaN tokens; without this, any NaN-tainted
+    field would silently drop the whole event. Lists, tuples, and dicts are
+    traversed.
+    """
+    import math as _math
+    if isinstance(obj, float):
+        if _math.isnan(obj) or _math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_for_json(v) for v in obj]
+    return obj
+
+
 class VizServer:
     """Stdlib HTTP+SSE server for live browser visualization.
 
@@ -118,8 +137,10 @@ class VizServer:
 
     def publish(self, event: dict):
         try:
-            data = json.dumps(event, ensure_ascii=False)
-        except (TypeError, ValueError):
+            sanitized = _sanitize_for_json(event)
+            data = json.dumps(sanitized, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as e:
+            logger.debug(f"viz publish: dropping unencodable event: {e}")
             return
         with self._clients_lock:
             for q in list(self._clients):
