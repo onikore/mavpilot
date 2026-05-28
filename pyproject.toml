@@ -34,7 +34,15 @@ Issues = "https://github.com/Onikore/mavpilot/issues"
 mavpilot = "mavpilot.cli:main_sync"
 
 [project.optional-dependencies]
-dev = ["pytest", "black", "mypy", "ruff"]
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=4.0",
+    "hypothesis>=6.0",
+    "black>=24.0",
+    "mypy>=1.7",
+    "ruff>=0.4",
+]
 
 [tool.setuptools.packages.find]
 include = ["mavpilot*"]
@@ -55,3 +63,10 @@ ignore_missing_imports = true
 # pymavlink is untyped; relax checks that surface false positives from it.
 warn_return_any = false
 disable_error_code = ["union-attr", "assignment"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "sitl: SITL-only tests, skipped by default (run with pytest -m sitl)",
+]
