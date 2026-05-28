@@ -89,6 +89,10 @@ class DroneController:
         self._stop_event = threading.Event()
 
         self._tel_lock = threading.Lock()
+        # Single threading.Lock funneling EVERY access to self.mav.mav.*_send
+        # and self.mav.recv_match. In Phase 3 this lock moves into a dedicated
+        # _connection.MAVLinkConnection class; the contract is identical.
+        self._mav_lock = threading.Lock()
         self._tel: dict = {
             "armed": False,
             "custom_mode": 0,
@@ -268,11 +272,12 @@ class DroneController:
         def loop():
             while not self._stop_event.is_set():
                 try:
-                    self.mav.mav.heartbeat_send(
-                        mavutil.mavlink.MAV_TYPE_ONBOARD_CONTROLLER,
-                        mavutil.mavlink.MAV_AUTOPILOT_INVALID,
-                        0, 0, 0,
-                    )
+                    with self._mav_lock:
+                        self.mav.mav.heartbeat_send(
+                            mavutil.mavlink.MAV_TYPE_ONBOARD_CONTROLLER,
+                            mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                            0, 0, 0,
+                        )
                 except Exception as e:
                     logger.warning(f"heartbeat send error: {e}")
                 if self._stop_event.wait(1.0):
@@ -409,7 +414,8 @@ class DroneController:
         def loop():
             while not self._stop_event.is_set():
                 try:
-                    msg = self.mav.recv_match(blocking=True, timeout=0.5)
+                    with self._mav_lock:
+                        msg = self.mav.recv_match(blocking=True, timeout=0.05)
                     if msg is None:
                         continue
                     self._handle_message(msg)
@@ -486,14 +492,15 @@ class DroneController:
         ]
         for msg_id, hz in wanted:
             interval_us = int(1e6 / hz)
-            self.mav.mav.command_long_send(
-                self.target_system,
-                self.target_component,
-                mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
-                0,
-                float(msg_id), float(interval_us),
-                0, 0, 0, 0, 0,
-            )
+            with self._mav_lock:
+                self.mav.mav.command_long_send(
+                    self.target_system,
+                    self.target_component,
+                    mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+                    0,
+                    float(msg_id), float(interval_us),
+                    0, 0, 0, 0, 0,
+                )
             await asyncio.sleep(0.05)
 
     async def apply_safe_params(
@@ -516,10 +523,11 @@ class DroneController:
             ("COM_RC_IN_MODE", int_to_float_bits(com_rc_in_mode), mavutil.mavlink.MAV_PARAM_TYPE_INT32),
         ]
         for name, value, ptype in params:
-            self.mav.mav.param_set_send(
-                self.target_system, self.target_component,
-                name.encode(), value, ptype,
-            )
+            with self._mav_lock:
+                self.mav.mav.param_set_send(
+                    self.target_system, self.target_component,
+                    name.encode(), value, ptype,
+                )
             human = (
                 struct.unpack("<i", struct.pack("<f", value))[0]
                 if ptype == mavutil.mavlink.MAV_PARAM_TYPE_INT32
@@ -638,16 +646,17 @@ class DroneController:
                         sp = dict(self._setpoint)
                     if not self._mock:
                         tb_ms = int(time.time() * 1e3) & 0xFFFFFFFF
-                        self.mav.mav.set_position_target_local_ned_send(
-                            tb_ms,
-                            self.target_system, self.target_component,
-                            mavutil.mavlink.MAV_FRAME_LOCAL_NED,
-                            sp["type_mask"],
-                            sp["x"], sp["y"], sp["z"],
-                            sp["vx"], sp["vy"], sp["vz"],
-                            0.0, 0.0, 0.0,
-                            sp["yaw"], 0.0,
-                        )
+                        with self._mav_lock:
+                            self.mav.mav.set_position_target_local_ned_send(
+                                tb_ms,
+                                self.target_system, self.target_component,
+                                mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+                                sp["type_mask"],
+                                sp["x"], sp["y"], sp["z"],
+                                sp["vx"], sp["vy"], sp["vz"],
+                                0.0, 0.0, 0.0,
+                                sp["yaw"], 0.0,
+                            )
                 except Exception as e:
                     logger.warning(f"streamer error: {e}")
                 time.sleep(self.loop_period)
@@ -674,15 +683,16 @@ class DroneController:
             logger.info(f"[MOCK] Mode → main={custom_main_mode} sub={custom_sub_mode}")
             await asyncio.sleep(0.05)
             return True
-        self.mav.mav.command_long_send(
-            self.target_system, self.target_component,
-            mavutil.mavlink.MAV_CMD_DO_SET_MODE,
-            0,
-            float(mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED),
-            float(custom_main_mode),
-            float(custom_sub_mode),
-            0, 0, 0, 0,
-        )
+        with self._mav_lock:
+            self.mav.mav.command_long_send(
+                self.target_system, self.target_component,
+                mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+                0,
+                float(mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED),
+                float(custom_main_mode),
+                float(custom_sub_mode),
+                0, 0, 0, 0,
+            )
         start = time.time()
         while time.time() - start < wait_for_confirm_s:
             await asyncio.sleep(0.1)
@@ -706,13 +716,14 @@ class DroneController:
             return True
         param1 = 1.0 if arm else 0.0
         param2 = 21196.0 if force else 0.0
-        self.mav.mav.command_long_send(
-            self.target_system, self.target_component,
-            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-            0,
-            param1, param2,
-            0, 0, 0, 0, 0,
-        )
+        with self._mav_lock:
+            self.mav.mav.command_long_send(
+                self.target_system, self.target_component,
+                mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                0,
+                param1, param2,
+                0, 0, 0, 0, 0,
+            )
         start = time.time()
         while time.time() - start < timeout_s:
             await asyncio.sleep(0.1)
@@ -901,11 +912,12 @@ class DroneController:
             PX4_CUSTOM_MAIN_MODE_AUTO, PX4_CUSTOM_SUB_MODE_AUTO_LAND,
         ):
             logger.warning("Land mode change rejected — sending MAV_CMD_NAV_LAND directly")
-            self.mav.mav.command_long_send(
-                self.target_system, self.target_component,
-                mavutil.mavlink.MAV_CMD_NAV_LAND,
-                0, 0, 0, 0, 0, 0, 0, 0,
-            )
+            with self._mav_lock:
+                self.mav.mav.command_long_send(
+                    self.target_system, self.target_component,
+                    mavutil.mavlink.MAV_CMD_NAV_LAND,
+                    0, 0, 0, 0, 0, 0, 0, 0,
+                )
 
         self._stop_streamer()
 
@@ -1112,11 +1124,12 @@ class DroneController:
         except Exception as e:
             logger.error(f"Emergency land failed: {e}")
             if not self._mock and self.mav is not None:
-                self.mav.mav.command_long_send(
-                    self.target_system, self.target_component,
-                    mavutil.mavlink.MAV_CMD_DO_FLIGHTTERMINATION,
-                    0, 1, 0, 0, 0, 0, 0, 0,
-                )
+                with self._mav_lock:
+                    self.mav.mav.command_long_send(
+                        self.target_system, self.target_component,
+                        mavutil.mavlink.MAV_CMD_DO_FLIGHTTERMINATION,
+                        0, 1, 0, 0, 0, 0, 0, 0,
+                    )
 
     def _viz_publish_command(self, command: str, **payload):
         if self._viz is None:
