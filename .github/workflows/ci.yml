@@ -5,7 +5,7 @@ on:
   push:
     branches: [ "main", "master" ]
     tags:
-      - 'v*' # Сработает, если на гитхабе создать тег, например, v1.0.0 или v0.1.2
+      - 'v*'
   pull_request:
     branches: [ "main", "master" ]
 
@@ -13,7 +13,6 @@ permissions:
   contents: read
 
 jobs:
-  # Твоя существующая задача тестирования (оставляем как есть)
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -36,21 +35,18 @@ jobs:
       - name: Run tests
         run: pytest -q
 
-  # Новая задача для публикации на PyPI
   publish:
     name: Publish to PyPI
-    needs: test # Деплой начнется ТОЛЬКО если все тесты на всех версиях Python прошли успешно
+    needs: test
     runs-on: ubuntu-latest
-    # Запускаем эту джобу только в том случае, если триггером послужил пуш тега (релиз)
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     
     permissions:
-      id-token: write # Важно для беспарольного Trusted Publishing
+      id-token: write
       contents: read
 
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
