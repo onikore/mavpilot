@@ -859,7 +859,12 @@ class DroneController:
         return await self._send_arm(arm=False, force=force, timeout_s=timeout_s)
 
     async def takeoff(self, altitude_m: float, timeout_s: float = 30.0) -> bool:
-        """Arm the vehicle, enter OFFBOARD mode, and climb to altitude_m."""
+        """Arm the vehicle, enter OFFBOARD mode, and climb to altitude_m.
+
+        Order: start setpoint stream → arm → set OFFBOARD → wait position.
+        PX4 firmware ≥1.13 can refuse arm-in-OFFBOARD; arming first is the
+        canonical sequence.
+        """
         logger.info(f"Takeoff to {altitude_m} m")
         pos = self.get_local_position()
         yaw = self.get_yaw_rad()
@@ -871,17 +876,22 @@ class DroneController:
             timeout_s=timeout_s,
         )
 
+        # 1. Start streaming current position as the setpoint, so PX4 sees
+        #    a fresh setpoint stream before any mode/arm transition.
         self._set_setpoint_position(pos.x, pos.y, pos.z, yaw)
         self._ensure_streamer_started()
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(1.5)  # let PX4 see ~75 setpoints before any state change
 
-        if not await self._set_mode(PX4_CUSTOM_MAIN_MODE_OFFBOARD):
-            raise DroneError("Failed to enter OFFBOARD")
-
+        # 2. Arm first — must precede OFFBOARD on PX4 ≥1.13.
         if not self.is_armed():
             if not await self.arm():
                 raise DroneError("Arm failed")
 
+        # 3. Enter OFFBOARD now that we're armed and streaming.
+        if not await self._set_mode(PX4_CUSTOM_MAIN_MODE_OFFBOARD):
+            raise DroneError("Failed to enter OFFBOARD")
+
+        # 4. Command the climb setpoint and wait for it.
         pos2 = self.get_local_position()
         target_z = pos2.z - altitude_m
         self._set_setpoint_position(pos2.x, pos2.y, target_z, self.get_yaw_rad())
