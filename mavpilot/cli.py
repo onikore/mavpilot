@@ -1,15 +1,20 @@
 """Command-line entrypoint and demo helper callbacks."""
+from __future__ import annotations
+
 import argparse
 import asyncio
 import logging
 import math
 import signal
-from typing import Optional
+from typing import Awaitable, Callable, Optional
+
+from pymavlink import mavutil
 
 from .controller import DroneController
 from .types import MarkerObservation
 from .utils import ned_to_body
-from pymavlink import mavutil
+
+logger = logging.getLogger("drone")
 
 
 def make_simulated_marker(drone: DroneController, marker_ned: tuple[float, float]):
@@ -27,7 +32,41 @@ def make_simulated_marker(drone: DroneController, marker_ned: tuple[float, float
     return callback
 
 
-async def main():
+async def handle_shutdown_signal(drone, reason: str = "shutdown") -> None:
+    """Best-effort emergency land in response to a shutdown signal.
+
+    Safe to call from outside the asyncio loop via loop.call_soon_threadsafe.
+    Swallows all exceptions — this is the last-resort path and must not raise.
+    """
+    logger.warning(f"{reason} — initiating emergency land")
+    try:
+        await drone.emergency_land()
+    except BaseException as e:
+        logger.error(f"emergency_land raised during shutdown: {e}")
+
+
+async def run_mission(drone, mission_body: Callable[[], Awaitable[None]]) -> None:
+    """Run the user's mission body with emergency_land on ANY failure.
+
+    Catches BaseException (NOT just Exception) so KeyboardInterrupt and
+    SystemExit also trigger the safety path. Always calls drone.close().
+    """
+    try:
+        await mission_body()
+    except BaseException as e:  # noqa: BLE001 — intentional last-resort catch
+        logger.exception(f"Mission terminated by {type(e).__name__}: {e}")
+        try:
+            await drone.emergency_land()
+        except BaseException as inner:
+            logger.error(f"emergency_land failed inside shutdown path: {inner}")
+    finally:
+        try:
+            drone.close()
+        except BaseException as e:
+            logger.error(f"drone.close() raised: {e}")
+
+
+def _build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="mavpilot — PX4 autonomous drone controller with browser visualization."
     )
@@ -53,12 +92,88 @@ async def main():
         help="Use precision landing with simulated marker instead of regular land.",
     )
     parser.add_argument(
-        "--pattern",
-        choices=["square", "star"],
-        default="square",
+        "--pattern", choices=["square", "star"], default="square",
         help="Demo flight pattern: square or star (default: square)",
     )
-    args = parser.parse_args()
+    return parser
+
+
+async def _demo_mission(drone: DroneController, args) -> None:
+    """The legacy demo flight: takeoff → pattern → (precision_)land → disarm."""
+    await drone.connect(timeout_s=30.0)
+    await drone.apply_safe_params()
+    await drone.wait_until_ready(timeout_s=60.0)
+
+    logger.info(
+        f"Open http://{args.viz_host}:{args.viz_port} in browser to see trajectory"
+    )
+    await asyncio.sleep(2.0)
+
+    await drone.takeoff(altitude_m=2.0, timeout_s=30.0)
+
+    if args.pattern == "square":
+        await drone.goto(x=2, y=2, z=-1, hover_time_s=2, timeout_s=20)
+        await drone.goto(x=-2, y=2, z=-2, hover_time_s=2, timeout_s=20)
+        await drone.goto(x=-2, y=-2, z=-3, hover_time_s=2, timeout_s=20)
+        await drone.goto(x=2, y=-2, z=-4, hover_time_s=2, timeout_s=20)
+    else:
+        pos = drone.get_local_position()
+        cx, cy, cz = pos.x, pos.y, pos.z
+        radius, points = 5.0, 5
+        pts = []
+        for k in range(points):
+            angle = 2 * math.pi * k / points - math.pi / 2
+            pts.append((cx + radius * math.cos(angle), cy + radius * math.sin(angle)))
+        order = []
+        step, i = 2, 0
+        for _ in range(points):
+            order.append(i)
+            i = (i + step) % points
+        waypoints = [pts[idx] for idx in order] + [pts[order[0]]]
+        for x, y in waypoints:
+            await drone.goto(x=x, y=y, z=cz, hover_time_s=1.5, timeout_s=20)
+
+    if args.precision_land:
+        marker_callback = make_simulated_marker(drone, marker_ned=(1.0, -1.0))
+        result = await drone.precision_land(
+            get_marker_offset=marker_callback,
+            descent_rate_mps=0.5,
+            final_altitude_m=0.5,
+            horizontal_tolerance_m=0.2,
+            timeout_s=60.0,
+        )
+        logger.info(f"precision_land result: {result.status.value}")
+        if not result:
+            logger.warning(
+                f"precision_land did not land cleanly: {result.status.value}; "
+                f"final position={result.final_position}"
+            )
+    else:
+        await drone.land(timeout_s=30.0)
+
+    await drone.disarm()
+    logger.info("Mission complete")
+
+
+def _install_signal_handlers(loop: asyncio.AbstractEventLoop, drone: DroneController) -> None:
+    """Wire SIGINT/SIGTERM to schedule emergency_land on the asyncio loop."""
+
+    def _scheduler(signame: str) -> Callable[..., None]:
+        def _h(*_: object) -> None:
+            try:
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.ensure_future(handle_shutdown_signal(drone, reason=signame))
+                )
+            except RuntimeError:
+                pass
+        return _h
+
+    signal.signal(signal.SIGINT, _scheduler("SIGINT"))
+    signal.signal(signal.SIGTERM, _scheduler("SIGTERM"))
+
+
+async def main() -> None:
+    args = _build_argparser().parse_args()
 
     logging.basicConfig(
         level=logging.INFO,
@@ -75,88 +190,16 @@ async def main():
         mock=args.mock,
     )
 
-    shutdown = asyncio.Event()
+    _install_signal_handlers(asyncio.get_running_loop(), drone)
 
-    def on_signal(*_):
-        logging.getLogger("drone").warning("Signal received — initiating emergency land")
-        shutdown.set()
-
-    signal.signal(signal.SIGINT, on_signal)
-    signal.signal(signal.SIGTERM, on_signal)
-
-    try:
-        await drone.connect(timeout_s=30.0)
-        await drone.apply_safe_params()
-        await drone.wait_until_ready(timeout_s=60.0)
-
-        logging.getLogger("drone").info(
-            f"Open http://localhost:{args.viz_port} in browser to see trajectory"
-        )
-        await asyncio.sleep(2.0)
-
-        await drone.takeoff(altitude_m=2.0, timeout_s=30.0)
-
-        if args.pattern == "square":
-            await drone.goto(x=2, y=2, z=-1, hover_time_s=2, timeout_s=20)
-            await drone.goto(x=-2, y=2, z=-2, hover_time_s=2, timeout_s=20)
-            await drone.goto(x=-2, y=-2, z=-3, hover_time_s=2, timeout_s=20)
-            await drone.goto(x=2, y=-2, z=-4, hover_time_s=2, timeout_s=20)
-        else:
-            pos = drone.get_local_position()
-            cx, cy, cz = pos.x, pos.y, pos.z
-            radius = 5.0
-            points = 5
-            pts = []
-            for k in range(points):
-                angle = 2 * math.pi * k / points - math.pi / 2
-                x = cx + radius * math.cos(angle)
-                y = cy + radius * math.sin(angle)
-                pts.append((x, y))
-            order = []
-            step = 2
-            i = 0
-            for _ in range(points):
-                order.append(i)
-                i = (i + step) % points
-            waypoints = [pts[idx] for idx in order] + [pts[order[0]]]
-            for x, y in waypoints:
-                await drone.goto(x=x, y=y, z=cz, hover_time_s=1.5, timeout_s=20)
-
-        if args.precision_land:
-            marker_callback = make_simulated_marker(drone, marker_ned=(1.0, -1.0))
-            result = await drone.precision_land(
-                get_marker_offset=marker_callback,
-                descent_rate_mps=0.5,
-                final_altitude_m=0.5,
-                horizontal_tolerance_m=0.2,
-                timeout_s=60.0,
-            )
-            logging.getLogger("drone").info(f"precision_land result: {result.status.value}")
-            if not result:
-                logging.getLogger("drone").warning(
-                    f"precision_land did not land cleanly: {result.status.value}; "
-                    f"final position={result.final_position}"
-                )
-        else:
-            await drone.land(timeout_s=30.0)
-
-        await drone.disarm()
-        logging.getLogger("drone").info("Mission complete")
-
-    except Exception as e:
-        logging.getLogger("drone").exception(f"Error in mission: {e}")
-        try:
-            await drone.emergency_land()
-        except Exception:
-            pass
-
-    finally:
-        drone.close()
+    await run_mission(drone, mission_body=lambda: _demo_mission(drone, args))
 
 
-def main_sync():
+def main_sync() -> None:
     """Synchronous wrapper for use as a console_scripts entry point."""
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
+        # run_mission already caught and called emergency_land; this just
+        # suppresses the noisy traceback on the way out.
         pass
