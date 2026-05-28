@@ -97,6 +97,7 @@ class DroneController:
         self._pending_acks: dict[tuple[int, int, int], dict] = {}
         self._pending_acks_lock = threading.Lock()
         self._ack_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._proc_start_monotonic = time.monotonic()
         self._tel: dict = {
             "armed": False,
             "custom_mode": 0,
@@ -687,7 +688,7 @@ class DroneController:
                                     self._setpoint["yaw"] = prev_yaw + math.copysign(max_step, yaw_err)
                         sp = dict(self._setpoint)
                     if not self._mock:
-                        tb_ms = int(time.time() * 1e3) & 0xFFFFFFFF
+                        tb_ms = int((time.monotonic() - self._proc_start_monotonic) * 1e3) & 0xFFFFFFFF
                         with self._mav_lock:
                             self.mav.mav.set_position_target_local_ned_send(
                                 tb_ms,
