@@ -434,9 +434,14 @@ class DroneController:
 
     def _handle_message(self, msg):
         t = msg.get_type()
+        try:
+            if msg.get_srcSystem() != self.target_system and self.target_system != 0:
+                return
+        except Exception:
+            pass
         now = time.time()
         with self._tel_lock:
-            if t == "HEARTBEAT" and msg.get_srcSystem() == self.target_system:
+            if t == "HEARTBEAT":
                 self._tel["armed"] = bool(
                     msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
                 )
