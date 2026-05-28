@@ -93,6 +93,10 @@ class DroneController:
         # and self.mav.recv_match. In Phase 3 this lock moves into a dedicated
         # _connection.MAVLinkConnection class; the contract is identical.
         self._mav_lock = threading.Lock()
+        # COMMAND_ACK routing: (cmd_id, target_sys, target_comp) -> {future, deadline_monotonic, base_timeout}
+        self._pending_acks: dict[tuple[int, int, int], dict] = {}
+        self._pending_acks_lock = threading.Lock()
+        self._ack_loop: Optional[asyncio.AbstractEventLoop] = None
         self._tel: dict = {
             "armed": False,
             "custom_mode": 0,
@@ -123,6 +127,7 @@ class DroneController:
         self.yaw_slew_rate_rad = math.radians(yaw_slew_rate_deg)
 
     async def connect(self, timeout_s: float = 30.0, baud: int = 57600):
+        self._ack_loop = asyncio.get_running_loop()
         if self._mock:
             logger.info("[MOCK MODE] no MAVLink connection, starting simulator")
             self.target_system = 1
@@ -156,7 +161,7 @@ class DroneController:
         self.mav = mavutil.mavlink_connection(self.connection_string, **kwargs)
         self.mav.mavlink20()
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         hb = await asyncio.wait_for(
             loop.run_in_executor(None, lambda: self.mav.wait_heartbeat(timeout=timeout_s)),
             timeout=timeout_s + 5,
@@ -477,6 +482,43 @@ class DroneController:
                 self._tel["last_ack"] = (msg.command, msg.result)
                 level = logging.INFO if msg.result == 0 else logging.WARNING
                 logger.log(level, f"ACK cmd={msg.command} result={r}")
+                self._route_command_ack(msg.command, msg.result)
+
+    def _route_command_ack(self, command: int, result: int) -> None:
+        """Resolve the pending Future for (command, target_sys, target_comp).
+
+        Called from the receiver thread (or _handle_message in tests). Uses
+        loop.call_soon_threadsafe to flip the Future on the asyncio loop.
+        """
+        IN_PROGRESS = 5
+        ACCEPTED = 0
+        key = (command, self.target_system, self.target_component)
+        with self._pending_acks_lock:
+            entry = self._pending_acks.get(key)
+            if entry is None:
+                return
+            if result == IN_PROGRESS:
+                entry["deadline"] += entry["base_timeout"]
+                logger.debug(f"IN_PROGRESS for cmd={command}; deadline extended")
+                return
+            fut = entry["future"]
+
+        if self._ack_loop is None or fut.done():
+            return
+
+        def _set() -> None:
+            if fut.done():
+                return
+            if result == ACCEPTED:
+                fut.set_result(True)
+            else:
+                name = ACK_RESULT_NAMES.get(result, str(result))
+                fut.set_exception(DroneError(f"cmd_id={command} ACK={name}"))
+
+        try:
+            self._ack_loop.call_soon_threadsafe(_set)
+        except RuntimeError:
+            pass
 
     async def _request_data_streams(self):
         if self._mock:
@@ -669,6 +711,73 @@ class DroneController:
         if self._streamer_thread is not None:
             self._streamer_thread.join(timeout=2.0)
             self._streamer_thread = None
+
+    async def send_command_long(
+        self,
+        cmd_id: int,
+        param1: float = 0.0,
+        param2: float = 0.0,
+        param3: float = 0.0,
+        param4: float = 0.0,
+        param5: float = 0.0,
+        param6: float = 0.0,
+        param7: float = 0.0,
+        timeout_s: float = 2.0,
+        confirmation: int = 0,
+    ) -> bool:
+        """Send MAV_CMD_<cmd_id> via COMMAND_LONG and await the terminal ACK.
+
+        IN_PROGRESS resets the deadline by ``timeout_s``; terminal non-ACCEPTED
+        results raise ``DroneError``. A duplicate in-flight command with the
+        same (cmd_id, target_sys, target_comp) raises immediately.
+        """
+        if self._ack_loop is None:
+            self._ack_loop = asyncio.get_running_loop()
+
+        key = (cmd_id, self.target_system, self.target_component)
+        with self._pending_acks_lock:
+            if key in self._pending_acks:
+                raise DroneError(f"duplicate in-flight command: cmd_id={cmd_id}")
+            fut: asyncio.Future = self._ack_loop.create_future()
+            self._pending_acks[key] = {
+                "future": fut,
+                "base_timeout": timeout_s,
+                "deadline": time.monotonic() + timeout_s,
+            }
+
+        try:
+            if self._mock:
+                if not fut.done():
+                    fut.set_result(True)
+            elif self.mav is not None:
+                with self._mav_lock:
+                    self.mav.mav.command_long_send(
+                        self.target_system, self.target_component,
+                        cmd_id,
+                        confirmation,
+                        param1, param2, param3, param4, param5, param6, param7,
+                    )
+
+            while True:
+                with self._pending_acks_lock:
+                    entry = self._pending_acks.get(key)
+                    if entry is None:
+                        break
+                    remaining = entry["deadline"] - time.monotonic()
+                if remaining <= 0:
+                    raise DroneError(f"COMMAND_ACK timeout for cmd_id={cmd_id}")
+                try:
+                    return await asyncio.wait_for(asyncio.shield(fut), timeout=remaining)
+                except asyncio.TimeoutError:
+                    continue
+            return fut.result()
+        except DroneError:
+            raise
+        except Exception as e:
+            raise DroneError(f"send_command_long failed: {e}") from e
+        finally:
+            with self._pending_acks_lock:
+                self._pending_acks.pop(key, None)
 
     async def _set_mode(
         self,
