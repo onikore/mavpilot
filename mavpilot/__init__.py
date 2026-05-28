@@ -1,7 +1,14 @@
 """mavpilot — async PX4 drone controller via MAVLink."""
-__all__ = ["DroneController", "DroneError", "Position", "MarkerObservation"]
+__all__ = [
+    "DroneController",
+    "DroneError",
+    "Position",
+    "MarkerObservation",
+    "PrecisionLandStatus",
+    "PrecisionLandResult",
+]
 
 from .controller import DroneController, DroneError
-from .types import Position, MarkerObservation
+from .types import MarkerObservation, Position, PrecisionLandResult, PrecisionLandStatus
 
-__version__ = "0.1.0"
+__version__ = "0.2.0.dev0"

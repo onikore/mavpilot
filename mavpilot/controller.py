@@ -931,13 +931,21 @@ class DroneController:
         lateral_p_gain: float = 0.7,
         max_horizontal_step_m: float = 1.0,
         marker_lost_timeout_s: float = 3.0,
-    ) -> bool:
+        min_altitude_floor_m: float = 0.3,
+    ) -> "PrecisionLandResult":
         """Vision-guided descent onto a marker.
 
-        get_marker_offset: callable returning MarkerObservation in body FRD,
-            or None when the marker is not visible.
-        Falls back to AUTO_LAND if the marker is lost for marker_lost_timeout_s.
+        Returns a PrecisionLandResult describing the terminal outcome.
+        Safety rules in v0.2.0:
+          * Descent below ``-min_altitude_floor_m`` (z in NED) is permitted
+            ONLY when the marker is currently visible AND horizontally
+            centered within ``horizontal_tolerance_m``.
+          * AUTO_LAND handoff (when altitude crosses ``final_altitude_m``)
+            also requires the marker to be visible AND centered. Otherwise
+            the call returns ABORTED_AT_FLOOR — drone holds floor altitude.
         """
+        from .types import PrecisionLandResult, PrecisionLandStatus
+
         if not self.is_offboard():
             raise DroneError("precision_land() requires OFFBOARD mode")
         if not self.is_armed():
@@ -949,11 +957,22 @@ class DroneController:
             timeout_s=timeout_s,
             descent_rate_mps=descent_rate_mps,
             final_altitude_m=final_altitude_m,
+            min_altitude_floor_m=min_altitude_floor_m,
         )
+
+        # Latch floor in NED z (negative = above ground). This is the deepest
+        # the setpoint is ever commanded; only marker-locked + centered
+        # descent below floor is allowed (used at handoff).
+        floor_z = -min_altitude_floor_m
+
         start = time.time()
         last_seen = time.time()
+        iterations = 0
+        last_centered = False
+        reached_floor = False
 
         while time.time() - start < timeout_s:
+            iterations += 1
             pos = self.get_local_position()
             yaw = self.get_yaw_rad()
             altitude = -pos.z
@@ -967,6 +986,8 @@ class DroneController:
             if obs is not None:
                 last_seen = time.time()
                 ned_dx, ned_dy = body_to_ned(obs.dx, obs.dy, yaw)
+                horizontal_err = math.hypot(ned_dx, ned_dy)
+                last_centered = horizontal_err < horizontal_tolerance_m
 
                 step_x = max(
                     -max_horizontal_step_m,
@@ -976,24 +997,36 @@ class DroneController:
                     -max_horizontal_step_m,
                     min(max_horizontal_step_m, ned_dy * lateral_p_gain),
                 )
-
                 target_x = pos.x + step_x
                 target_y = pos.y + step_y
-                horizontal_err = math.hypot(ned_dx, ned_dy)
 
                 if altitude <= final_altitude_m:
-                    logger.info(
-                        f"Reached final altitude {altitude:.2f} m, hand-off to AUTO_LAND"
-                    )
-                    return await self.land(
-                        timeout_s=max(10.0, timeout_s - (time.time() - start))
-                    )
-
-                if horizontal_err < horizontal_tolerance_m:
-                    descent = descent_rate_mps * self.loop_period
-                    target_z = pos.z + descent
+                    reached_floor = True
+                    if last_centered:
+                        logger.info(
+                            f"Reached final altitude {altitude:.2f} m with marker "
+                            f"centered (err={horizontal_err:.2f} m); handing off to AUTO_LAND"
+                        )
+                        landed = await self.land(
+                            timeout_s=max(10.0, timeout_s - (time.time() - start))
+                        )
+                        return PrecisionLandResult(
+                            status=(
+                                PrecisionLandStatus.LANDED if landed
+                                else PrecisionLandStatus.HANDED_OFF
+                            ),
+                            final_position=self.get_local_position(),
+                            iterations=iterations,
+                        )
+                    else:
+                        # At floor but off-center — hold floor altitude, keep trying.
+                        target_z = floor_z
                 else:
-                    target_z = pos.z
+                    if last_centered:
+                        descent = descent_rate_mps * self.loop_period
+                        target_z = min(pos.z + descent, floor_z)  # never below floor
+                    else:
+                        target_z = pos.z  # hold current z while off-center
 
                 self._set_setpoint_position(target_x, target_y, target_z, yaw)
 
@@ -1002,21 +1035,46 @@ class DroneController:
                         "type": "marker",
                         "marker_ned": {"x": pos.x + ned_dx, "y": pos.y + ned_dy},
                         "horizontal_err": horizontal_err,
+                        "centered": last_centered,
                         "ts": time.time(),
                     })
             else:
+                if reached_floor:
+                    logger.warning(
+                        "Marker lost at floor altitude — aborting precision_land "
+                        "(holding floor altitude, NOT handing off to AUTO_LAND)"
+                    )
+                    return PrecisionLandResult(
+                        status=PrecisionLandStatus.ABORTED_AT_FLOOR,
+                        final_position=self.get_local_position(),
+                        iterations=iterations,
+                    )
                 if time.time() - last_seen > marker_lost_timeout_s:
                     logger.warning(
-                        f"Marker lost for {marker_lost_timeout_s}s — fallback to AUTO_LAND"
+                        f"Marker lost for {marker_lost_timeout_s}s above floor "
+                        f"(altitude {altitude:.2f} m) — fallback to AUTO_LAND"
                     )
-                    return await self.land(
+                    landed = await self.land(
                         timeout_s=max(10.0, timeout_s - (time.time() - start))
+                    )
+                    status = (
+                        PrecisionLandStatus.LANDED if landed
+                        else PrecisionLandStatus.MARKER_LOST
+                    )
+                    return PrecisionLandResult(
+                        status=status,
+                        final_position=self.get_local_position(),
+                        iterations=iterations,
                     )
 
             await asyncio.sleep(self.loop_period)
 
-        logger.warning("Precision land timeout — fallback to AUTO_LAND")
-        return await self.land(timeout_s=30.0)
+        logger.warning("Precision land timeout — returning TIMEOUT (no AUTO_LAND fallback)")
+        return PrecisionLandResult(
+            status=PrecisionLandStatus.TIMEOUT,
+            final_position=self.get_local_position(),
+            iterations=iterations,
+        )
 
     async def return_to_launch(self, timeout_s: float = 120.0) -> bool:
         """Switch to AUTO_RTL and wait until landed."""

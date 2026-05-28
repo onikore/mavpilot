@@ -124,13 +124,19 @@ async def main():
 
         if args.precision_land:
             marker_callback = make_simulated_marker(drone, marker_ned=(1.0, -1.0))
-            await drone.precision_land(
+            result = await drone.precision_land(
                 get_marker_offset=marker_callback,
                 descent_rate_mps=0.5,
                 final_altitude_m=0.5,
                 horizontal_tolerance_m=0.2,
                 timeout_s=60.0,
             )
+            logging.getLogger("drone").info(f"precision_land result: {result.status.value}")
+            if not result:
+                logging.getLogger("drone").warning(
+                    f"precision_land did not land cleanly: {result.status.value}; "
+                    f"final position={result.final_position}"
+                )
         else:
             await drone.land(timeout_s=30.0)
 
