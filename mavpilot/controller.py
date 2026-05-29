@@ -220,6 +220,14 @@ class DroneController:
         self._streamer.watchdog_tripped = value
 
     @property
+    def _send_fault_tripped(self) -> bool:
+        return self._streamer.send_fault_tripped
+
+    @_send_fault_tripped.setter
+    def _send_fault_tripped(self, value: bool) -> None:
+        self._streamer.send_fault_tripped = value
+
+    @property
     def _mav_lock(self) -> threading.Lock:
         return self._connection._lock
 

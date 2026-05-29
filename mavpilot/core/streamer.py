@@ -58,6 +58,10 @@ class OffboardStreamer:
         self._streaming = False
         self._streamer_thread: threading.Thread | None = None
         self.watchdog_tripped = False
+        # Latched True after ~0.5 s of consecutive outbound send failures (the
+        # outbound link is down). Distinct from watchdog_tripped, which watches
+        # *incoming* LOCAL_POSITION_NED. Cleared by DroneController.reconnect().
+        self.send_fault_tripped = False
 
     @property
     def streaming(self) -> bool:
@@ -106,6 +110,10 @@ class OffboardStreamer:
 
         def loop():
             last = time.time()
+            consecutive_send_failures = 0
+            last_warn = 0.0
+            # ~0.5 s of consecutive failures before latching the fault.
+            fault_threshold = max(1, int(0.5 / self.loop_period))
             while self._streaming and not self._stop_event.is_set():
                 now = time.time()
                 dt = max(1e-6, min(0.2, now - last))
@@ -154,7 +162,23 @@ class OffboardStreamer:
                             0.0,
                         )
                 except Exception as e:
-                    logger.warning(f"streamer error: {e}")
+                    consecutive_send_failures += 1
+                    # Rate-limit to once a second so a dead link can't flood the
+                    # log at the 50 Hz loop rate.
+                    now_w = time.time()
+                    if now_w - last_warn >= 1.0:
+                        logger.warning(
+                            f"streamer send error ({consecutive_send_failures} consecutive): {e}"
+                        )
+                        last_warn = now_w
+                    if consecutive_send_failures >= fault_threshold and not self.send_fault_tripped:
+                        logger.error(
+                            f"streamer send fault latched after {consecutive_send_failures} "
+                            "consecutive failures (outbound link down)"
+                        )
+                        self.send_fault_tripped = True
+                else:
+                    consecutive_send_failures = 0
                 time.sleep(self.loop_period)
                 with tel._lock:
                     last_ts = tel._tel["last_local_pos_ts"]
