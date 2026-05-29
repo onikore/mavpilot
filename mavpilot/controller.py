@@ -611,7 +611,8 @@ class DroneController:
             return self._tel["yaw"]
 
     def get_yaw_deg(self) -> float:
-        return math.degrees(self.get_yaw_rad())
+        from .utils import normalize_yaw_deg
+        return normalize_yaw_deg(math.degrees(self.get_yaw_rad()))
 
     def is_armed(self) -> bool:
         with self._tel_lock:

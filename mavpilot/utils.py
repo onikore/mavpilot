@@ -53,3 +53,11 @@ def ned_to_body(ned_dx: float, ned_dy: float, yaw_rad: float) -> Tuple[float, fl
     body_dx = cy * ned_dx + sy * ned_dy
     body_dy = -sy * ned_dx + cy * ned_dy
     return body_dx, body_dy
+
+
+def normalize_yaw_deg(yaw_deg: float) -> float:
+    """Wrap yaw in degrees to [-180, 180]."""
+    y = yaw_deg % 360.0
+    if y > 180.0:
+        y -= 360.0
+    return y

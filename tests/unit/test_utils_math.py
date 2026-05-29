@@ -4,7 +4,7 @@ import math
 import pytest
 from hypothesis import given, strategies as st
 
-from mavpilot.utils import body_to_ned, ned_to_body, pixel_to_body_offset, int_to_float_bits
+from mavpilot.utils import body_to_ned, ned_to_body, pixel_to_body_offset, int_to_float_bits, normalize_yaw_deg
 
 
 class TestPixelToBodyOffset:
@@ -82,3 +82,19 @@ class TestIntToFloatBits:
         as_float = int_to_float_bits(v)
         as_int_back = struct.unpack("<i", struct.pack("<f", as_float))[0]
         assert as_int_back == v
+
+
+class TestNormalizeYawDeg:
+    def test_in_range_unchanged(self):
+        assert normalize_yaw_deg(0.0) == pytest.approx(0.0)
+        assert normalize_yaw_deg(90.0) == pytest.approx(90.0)
+        assert normalize_yaw_deg(-90.0) == pytest.approx(-90.0)
+
+    def test_above_180_wraps(self):
+        assert normalize_yaw_deg(181.0) == pytest.approx(-179.0)
+        assert normalize_yaw_deg(360.0) == pytest.approx(0.0)
+        assert normalize_yaw_deg(540.0) == pytest.approx(180.0)
+
+    def test_below_neg180_wraps(self):
+        assert normalize_yaw_deg(-181.0) == pytest.approx(179.0)
+        assert normalize_yaw_deg(-360.0) == pytest.approx(0.0)
