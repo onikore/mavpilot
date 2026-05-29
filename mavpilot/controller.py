@@ -57,6 +57,7 @@ class DroneController:
         viz_host: str = "127.0.0.1",
         mock: bool = False,
         yaw_slew_rate_deg: float = 15.0,
+        telemetry_watchdog_s: float = 2.0,
     ):
         self.connection_string = connection_string
         self.source_system = source_system
@@ -98,6 +99,12 @@ class DroneController:
         self._pending_acks_lock = threading.Lock()
         self._ack_loop: Optional[asyncio.AbstractEventLoop] = None
         self._proc_start_monotonic = time.monotonic()
+        self.telemetry_watchdog_s = telemetry_watchdog_s
+        self._watchdog_tripped = False
+        # Mock-only fault injection: when True, the simulator stops emitting
+        # telemetry (freezes last_local_pos_ts), simulating an autopilot link
+        # going silent. Used to exercise the telemetry watchdog in tests.
+        self._mock_sim_paused = False
         self._tel: dict = {
             "armed": False,
             "custom_mode": 0,
@@ -300,6 +307,11 @@ class DroneController:
         def loop():
             last = time.time()
             while not self._stop_event.is_set():
+                if self._mock_sim_paused:
+                    # Simulated telemetry loss: don't touch _tel at all.
+                    time.sleep(0.01)
+                    last = time.time()
+                    continue
                 now = time.time()
                 dt = max(0.001, min(0.05, now - last))
                 last = now
@@ -709,6 +721,16 @@ class DroneController:
                 except Exception as e:
                     logger.warning(f"streamer error: {e}")
                 time.sleep(self.loop_period)
+                with self._tel_lock:
+                    last_ts = self._tel["last_local_pos_ts"]
+                if last_ts > 0 and (time.time() - last_ts) > self.telemetry_watchdog_s:
+                    if not self._watchdog_tripped:
+                        logger.error(
+                            f"telemetry watchdog tripped: no LOCAL_POSITION_NED "
+                            f"for {time.time() - last_ts:.1f}s "
+                            f"(threshold {self.telemetry_watchdog_s}s)"
+                        )
+                        self._watchdog_tripped = True
 
         self._streamer_thread = threading.Thread(target=loop, daemon=True, name="streamer")
         self._streamer_thread.start()
@@ -865,6 +887,12 @@ class DroneController:
         logger.info(f"Disarming{' (FORCED)' if force else ''}...")
         return await self._send_arm(arm=False, force=force, timeout_s=timeout_s)
 
+    def _check_watchdog(self) -> None:
+        if self._watchdog_tripped:
+            raise DroneError(
+                "telemetry lost: streamer watchdog tripped — call emergency_land()"
+            )
+
     async def takeoff(self, altitude_m: float, timeout_s: float = 30.0) -> bool:
         """Arm the vehicle, enter OFFBOARD mode, and climb to altitude_m.
 
@@ -872,6 +900,7 @@ class DroneController:
         PX4 firmware ≥1.13 can refuse arm-in-OFFBOARD; arming first is the
         canonical sequence.
         """
+        self._check_watchdog()
         logger.info(f"Takeoff to {altitude_m} m")
         pos = self.get_local_position()
         yaw = self.get_yaw_rad()
@@ -922,6 +951,7 @@ class DroneController:
         z_tol_m: float = 0.5,
     ) -> bool:
         """Fly to an absolute NED position. Requires OFFBOARD + armed."""
+        self._check_watchdog()
         if not self.is_offboard():
             raise DroneError(
                 f"goto() requires OFFBOARD mode, current main_mode={self.get_main_mode()}"
@@ -1005,6 +1035,7 @@ class DroneController:
 
     async def set_yaw(self, yaw_deg: float, timeout_s: float = 10.0) -> bool:
         """Rotate in-place to yaw_deg (degrees, NED convention)."""
+        self._check_watchdog()
         pos = self.get_local_position()
         logger.info(f"Yaw → {yaw_deg}°")
         self._viz_publish_command("set_yaw", yaw_deg=yaw_deg)
@@ -1027,6 +1058,7 @@ class DroneController:
 
     async def land(self, timeout_s: float = 60.0) -> bool:
         """Switch to AUTO_LAND and wait until on-ground."""
+        self._check_watchdog()
         logger.info("Auto LAND")
         pos = self.get_local_position()
         self._viz_publish_command(
@@ -1084,6 +1116,7 @@ class DroneController:
         """
         from .types import PrecisionLandResult, PrecisionLandStatus
 
+        self._check_watchdog()
         if not self.is_offboard():
             raise DroneError("precision_land() requires OFFBOARD mode")
         if not self.is_armed():
@@ -1216,6 +1249,7 @@ class DroneController:
 
     async def return_to_launch(self, timeout_s: float = 120.0) -> bool:
         """Switch to AUTO_RTL and wait until landed."""
+        self._check_watchdog()
         logger.info("Return to Launch")
         pos = self.get_local_position()
         self._viz_publish_command(
