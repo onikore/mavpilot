@@ -67,8 +67,11 @@ jobs:
   publish-to-pypi:
     name: >-
       Publish Python 🐍 distribution 📦 to PyPI
-    if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'
+    # Publish only on version tags (v*). PyPI rejects duplicate versions, so
+    # publishing on every main push would go red after the first release.
+    if: startsWith(github.ref, 'refs/tags/v')
     needs:
+    - test
     - build
     runs-on: ubuntu-latest
     environment:
