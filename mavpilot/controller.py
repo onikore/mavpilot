@@ -14,7 +14,6 @@ from typing import Callable, Optional
 from pymavlink import mavutil
 
 from .constants import (
-    DEFAULT_POS_TYPE_MASK,
     PX4_CUSTOM_MAIN_MODE_AUTO,
     PX4_CUSTOM_MAIN_MODE_OFFBOARD,
     PX4_CUSTOM_SUB_MODE_AUTO_LAND,
@@ -24,6 +23,7 @@ from .constants import (
 )
 from ._commands import CommandSender
 from ._connection import MAVLinkConnection
+from ._streamer import OffboardStreamer
 from ._telemetry import Telemetry
 from .errors import DroneError
 from .types import Position, MarkerObservation
@@ -79,20 +79,6 @@ class DroneController:
         self._mock_target_component = 0
         self._mock_sim_thread: Optional[threading.Thread] = None
 
-        self._setpoint_lock = threading.Lock()
-        self._setpoint = {
-            "x": 0.0,
-            "y": 0.0,
-            "z": 0.0,
-            "vx": 0.0,
-            "vy": 0.0,
-            "vz": 0.0,
-            "yaw": float("nan"),
-            "yaw_target": float("nan"),
-            "type_mask": DEFAULT_POS_TYPE_MASK,
-        }
-        self._streaming = False
-        self._streamer_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
         # Telemetry state + parsing live in the Telemetry collaborator. The
@@ -112,7 +98,8 @@ class DroneController:
         )
         self._proc_start_monotonic = time.monotonic()
         self.telemetry_watchdog_s = telemetry_watchdog_s
-        self._watchdog_tripped = False
+        # Offboard setpoint streaming + telemetry watchdog live in
+        # OffboardStreamer (constructed after yaw_slew_rate_rad below).
         # Mock-only fault injection: when True, the simulator stops emitting
         # telemetry (freezes last_local_pos_ts), simulating an autopilot link
         # going silent. Used to exercise the telemetry watchdog in tests.
@@ -128,6 +115,17 @@ class DroneController:
 
         self._shutdown_requested = False
         self.yaw_slew_rate_rad = math.radians(yaw_slew_rate_deg)
+
+        self._streamer = OffboardStreamer(
+            connection=self._connection,
+            telemetry=self._telemetry,
+            mock=mock,
+            loop_hz=loop_hz,
+            yaw_slew_rate_rad=self.yaw_slew_rate_rad,
+            telemetry_watchdog_s=telemetry_watchdog_s,
+            stop_event=self._stop_event,
+            proc_start_monotonic=self._proc_start_monotonic,
+        )
 
     # ---- MAVLink connection shims (Phase 3) -------------------------------
     # The pymavlink connection, the I/O lock, and target sysid live inside
@@ -158,6 +156,30 @@ class DroneController:
     @property
     def _tel_lock(self) -> threading.Lock:
         return self._telemetry._lock
+
+    @property
+    def _setpoint(self) -> dict:
+        return self._streamer._setpoint
+
+    @property
+    def _setpoint_lock(self) -> threading.Lock:
+        return self._streamer._setpoint_lock
+
+    @property
+    def _streaming(self) -> bool:
+        return self._streamer._streaming
+
+    @_streaming.setter
+    def _streaming(self, value: bool) -> None:
+        self._streamer._streaming = value
+
+    @property
+    def _watchdog_tripped(self) -> bool:
+        return self._streamer.watchdog_tripped
+
+    @_watchdog_tripped.setter
+    def _watchdog_tripped(self, value: bool) -> None:
+        self._streamer.watchdog_tripped = value
 
     @property
     def _mav_lock(self) -> threading.Lock:
@@ -251,15 +273,14 @@ class DroneController:
 
     def close(self):
         self._shutdown_requested = True
-        self._streaming = False
         self._stop_event.set()
+        self._streamer.stop()
         if self._viz_publisher_task_handle is not None:
             self._viz_publisher_task_handle.cancel()
         if self._viz is not None:
             self._viz.stop()
-        for thr in (self._streamer_thread, self._mock_sim_thread):
-            if thr is not None and thr.is_alive():
-                thr.join(timeout=2.0)
+        if self._mock_sim_thread is not None and self._mock_sim_thread.is_alive():
+            self._mock_sim_thread.join(timeout=2.0)
         # Heartbeat/receiver threads and the pymavlink socket are owned by the
         # connection (non-mock only).
         if self._connection is not None:
@@ -463,101 +484,14 @@ class DroneController:
     def landed_state(self) -> int:
         return self._telemetry.landed_state()
 
-    def _set_setpoint_position(
-        self,
-        x: float,
-        y: float,
-        z: float,
-        yaw_rad: Optional[float] = None,
-    ):
-        with self._setpoint_lock:
-            self._setpoint["x"] = x
-            self._setpoint["y"] = y
-            self._setpoint["z"] = z
-            self._setpoint["vx"] = 0.0
-            self._setpoint["vy"] = 0.0
-            self._setpoint["vz"] = 0.0
-            if yaw_rad is None:
-                self._setpoint["yaw_target"] = float("nan")
-                self._setpoint["yaw"] = float("nan")
-            else:
-                self._setpoint["yaw_target"] = yaw_rad
-                if math.isnan(self._setpoint.get("yaw", float("nan"))):
-                    self._setpoint["yaw"] = yaw_rad
-            self._setpoint["type_mask"] = DEFAULT_POS_TYPE_MASK
+    def _set_setpoint_position(self, x, y, z, yaw_rad: Optional[float] = None):
+        self._streamer.set_position(x, y, z, yaw_rad)
 
     def _ensure_streamer_started(self):
-        if self._streaming:
-            return
-        with self._tel_lock:
-            if not self._tel["local_position_ok"]:
-                raise DroneError(
-                    "Cannot start offboard streamer before EKF gives LOCAL_POSITION_NED. "
-                    "Call wait_until_ready() first."
-                )
-        pos = self.get_local_position()
-        self._set_setpoint_position(pos.x, pos.y, pos.z, self.get_yaw_rad())
-        self._streaming = True
-
-        def loop():
-            last = time.time()
-            while self._streaming and not self._stop_event.is_set():
-                now = time.time()
-                dt = max(1e-6, min(0.2, now - last))
-                last = now
-                try:
-                    with self._setpoint_lock:
-                        prev_yaw = self._setpoint.get("yaw", float("nan"))
-                        target_yaw = self._setpoint.get("yaw_target", float("nan"))
-                        if not math.isnan(target_yaw):
-                            if math.isnan(prev_yaw):
-                                self._setpoint["yaw"] = target_yaw
-                            else:
-                                yaw_err = math.atan2(
-                                    math.sin(target_yaw - prev_yaw),
-                                    math.cos(target_yaw - prev_yaw),
-                                )
-                                max_step = self.yaw_slew_rate_rad * dt
-                                if abs(yaw_err) <= max_step:
-                                    self._setpoint["yaw"] = target_yaw
-                                else:
-                                    self._setpoint["yaw"] = prev_yaw + math.copysign(max_step, yaw_err)
-                        sp = dict(self._setpoint)
-                    if not self._mock:
-                        tb_ms = int((time.monotonic() - self._proc_start_monotonic) * 1e3) & 0xFFFFFFFF
-                        with self._mav_lock:
-                            self.mav.mav.set_position_target_local_ned_send(
-                                tb_ms,
-                                self.target_system, self.target_component,
-                                mavutil.mavlink.MAV_FRAME_LOCAL_NED,
-                                sp["type_mask"],
-                                sp["x"], sp["y"], sp["z"],
-                                sp["vx"], sp["vy"], sp["vz"],
-                                0.0, 0.0, 0.0,
-                                sp["yaw"], 0.0,
-                            )
-                except Exception as e:
-                    logger.warning(f"streamer error: {e}")
-                time.sleep(self.loop_period)
-                with self._tel_lock:
-                    last_ts = self._tel["last_local_pos_ts"]
-                if last_ts > 0 and (time.time() - last_ts) > self.telemetry_watchdog_s:
-                    if not self._watchdog_tripped:
-                        logger.error(
-                            f"telemetry watchdog tripped: no LOCAL_POSITION_NED "
-                            f"for {time.time() - last_ts:.1f}s "
-                            f"(threshold {self.telemetry_watchdog_s}s)"
-                        )
-                        self._watchdog_tripped = True
-
-        self._streamer_thread = threading.Thread(target=loop, daemon=True, name="streamer")
-        self._streamer_thread.start()
+        self._streamer.start()
 
     def _stop_streamer(self):
-        self._streaming = False
-        if self._streamer_thread is not None:
-            self._streamer_thread.join(timeout=2.0)
-            self._streamer_thread = None
+        self._streamer.stop()
 
     async def send_command_long(self, *args, **kwargs) -> bool:
         """Send MAV_CMD_<cmd_id> via COMMAND_LONG and await the terminal ACK.
