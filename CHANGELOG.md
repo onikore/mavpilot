@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.1 — 2026-05-29
+
+### Internal
+- Moved the eight internal collaborator modules into a `mavpilot/core/`
+  subpackage (`connection`, `telemetry`, `commands`, `streamer`, `mission`,
+  `precision_land`, `safety`, `mock`) to declutter the top-level package.
+  No public API change — `mavpilot`, `mavpilot.controller`, `mavpilot.errors`,
+  `mavpilot.types`, `mavpilot.utils`, and `mavpilot.viz` are unchanged.
+- CI: PyPI publish now triggers only on `v*` tags and requires the test job
+  to pass first.
+
 ## 0.2.0 — 2026-05-29
 
 ### Breaking changes

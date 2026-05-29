@@ -14,9 +14,9 @@ import math
 import time
 from collections.abc import Callable
 
-from .errors import DroneError
-from .types import MarkerObservation, PrecisionLandResult, PrecisionLandStatus
-from .utils import body_to_ned
+from ..errors import DroneError
+from ..types import MarkerObservation, PrecisionLandResult, PrecisionLandStatus
+from ..utils import body_to_ned
 
 logger = logging.getLogger("drone")
 

@@ -15,14 +15,14 @@ from typing import TYPE_CHECKING
 
 from pymavlink import mavutil
 
-from ._commands import CommandSender
-from ._connection import MAVLinkConnection
-from ._mission import MissionOps
-from ._mock import MockMavConnection, MockSimulator
-from ._precision_land import PrecisionLand
-from ._safety import SafetyOps
-from ._streamer import OffboardStreamer
-from ._telemetry import Telemetry
+from .core.commands import CommandSender
+from .core.connection import MAVLinkConnection
+from .core.mission import MissionOps
+from .core.mock import MockMavConnection, MockSimulator
+from .core.precision_land import PrecisionLand
+from .core.safety import SafetyOps
+from .core.streamer import OffboardStreamer
+from .core.telemetry import Telemetry
 from .errors import DroneError
 from .types import Position
 from .viz import VizServer
