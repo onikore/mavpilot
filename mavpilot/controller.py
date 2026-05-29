@@ -7,7 +7,6 @@ event loop runs user mission code on top.
 import asyncio
 import logging
 import math
-import struct
 import threading
 import time
 from typing import Callable, Optional
@@ -15,7 +14,6 @@ from typing import Callable, Optional
 from pymavlink import mavutil
 
 from .constants import (
-    ACK_RESULT_NAMES,
     DEFAULT_POS_TYPE_MASK,
     PX4_CUSTOM_MAIN_MODE_AUTO,
     PX4_CUSTOM_MAIN_MODE_OFFBOARD,
@@ -24,17 +22,15 @@ from .constants import (
     PX4_CUSTOM_SUB_MODE_AUTO_RTL,
     PX4_CUSTOM_SUB_MODE_AUTO_TAKEOFF,
 )
+from ._commands import CommandSender
 from ._connection import MAVLinkConnection
 from ._telemetry import Telemetry
+from .errors import DroneError
 from .types import Position, MarkerObservation
-from .utils import int_to_float_bits, body_to_ned
+from .utils import body_to_ned
 from .viz import VizServer
 
 logger = logging.getLogger("drone")
-
-
-class DroneError(RuntimeError):
-    """Any non-standard situation: command failure, timeout, loss-of-comm."""
 
 
 class DroneController:
@@ -107,10 +103,13 @@ class DroneController:
         # fallback lock is only used in mock mode (no real connection) so the
         # `with self._mav_lock:` blocks still work; nothing real is guarded.
         self._mock_mav_lock = threading.Lock()
-        # COMMAND_ACK routing: (cmd_id, target_sys, target_comp) -> {future, deadline_monotonic, base_timeout}
-        self._pending_acks: dict[tuple[int, int, int], dict] = {}
-        self._pending_acks_lock = threading.Lock()
-        self._ack_loop: Optional[asyncio.AbstractEventLoop] = None
+        # Command emission + COMMAND_ACK Future routing live in CommandSender.
+        self._commands = CommandSender(
+            self._connection,
+            self._telemetry,
+            mock,
+            get_target=lambda: (self.target_system, self.target_component),
+        )
         self._proc_start_monotonic = time.monotonic()
         self.telemetry_watchdog_s = telemetry_watchdog_s
         self._watchdog_tripped = False
@@ -124,7 +123,7 @@ class DroneController:
         )
         # Wire telemetry's outbound hooks now that viz exists.
         self._telemetry.viz = self._viz
-        self._telemetry.route_ack = self._route_command_ack
+        self._telemetry.route_ack = self._commands.route_command_ack
         self._viz_publisher_task_handle: Optional[asyncio.Task] = None
 
         self._shutdown_requested = False
@@ -135,6 +134,22 @@ class DroneController:
     # self._connection (non-mock). These properties keep the historical
     # attribute surface (self.mav, self._mav_lock, self.target_system, …)
     # working for call sites and tests during the decomposition.
+
+    @property
+    def _ack_loop(self):
+        return self._commands._ack_loop
+
+    @_ack_loop.setter
+    def _ack_loop(self, value) -> None:
+        self._commands._ack_loop = value
+
+    @property
+    def _pending_acks(self) -> dict:
+        return self._commands._pending_acks
+
+    @property
+    def _pending_acks_lock(self) -> threading.Lock:
+        return self._commands._pending_acks_lock
 
     @property
     def _tel(self) -> dict:
@@ -384,66 +399,8 @@ class DroneController:
         # entry point (the connection's receiver thread and some tests call it).
         self._telemetry.handle_message(msg)
 
-    def _route_command_ack(self, command: int, result: int) -> None:
-        """Resolve the pending Future for (command, target_sys, target_comp).
-
-        Called from the receiver thread (or _handle_message in tests). Uses
-        loop.call_soon_threadsafe to flip the Future on the asyncio loop.
-        """
-        IN_PROGRESS = 5
-        ACCEPTED = 0
-        key = (command, self.target_system, self.target_component)
-        with self._pending_acks_lock:
-            entry = self._pending_acks.get(key)
-            if entry is None:
-                return
-            if result == IN_PROGRESS:
-                entry["deadline"] += entry["base_timeout"]
-                logger.debug(f"IN_PROGRESS for cmd={command}; deadline extended")
-                return
-            fut = entry["future"]
-
-        if self._ack_loop is None or fut.done():
-            return
-
-        def _set() -> None:
-            if fut.done():
-                return
-            if result == ACCEPTED:
-                fut.set_result(True)
-            else:
-                name = ACK_RESULT_NAMES.get(result, str(result))
-                fut.set_exception(DroneError(f"cmd_id={command} ACK={name}"))
-
-        try:
-            self._ack_loop.call_soon_threadsafe(_set)
-        except RuntimeError:
-            pass
-
     async def _request_data_streams(self):
-        if self._mock:
-            return
-        wanted = [
-            (mavutil.mavlink.MAVLINK_MSG_ID_LOCAL_POSITION_NED, 50),
-            (mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE, 50),
-            (mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT, 10),
-            (mavutil.mavlink.MAVLINK_MSG_ID_EXTENDED_SYS_STATE, 1),
-            (mavutil.mavlink.MAVLINK_MSG_ID_BATTERY_STATUS, 1),
-            (mavutil.mavlink.MAVLINK_MSG_ID_SYS_STATUS, 1),
-            (mavutil.mavlink.MAVLINK_MSG_ID_HEARTBEAT, 1),
-        ]
-        for msg_id, hz in wanted:
-            interval_us = int(1e6 / hz)
-            with self._mav_lock:
-                self.mav.mav.command_long_send(
-                    self.target_system,
-                    self.target_component,
-                    mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
-                    0,
-                    float(msg_id), float(interval_us),
-                    0, 0, 0, 0, 0,
-                )
-            await asyncio.sleep(0.05)
+        return await self._commands.request_data_streams()
 
     async def apply_safe_params(
         self,
@@ -453,30 +410,12 @@ class DroneController:
         com_rc_in_mode: int = 1,
     ):
         """Write recommended PX4 safety parameters for offboard missions."""
-        if self._mock:
-            logger.info(f"[MOCK] apply_safe_params: rcl_except={com_rcl_except}, "
-                        f"obl_rc_act={com_obl_rc_act}, of_loss_t={com_of_loss_t}, "
-                        f"rc_in_mode={com_rc_in_mode} (no-op)")
-            return
-        params = [
-            ("COM_RCL_EXCEPT", int_to_float_bits(com_rcl_except), mavutil.mavlink.MAV_PARAM_TYPE_INT32),
-            ("COM_OBL_RC_ACT", int_to_float_bits(com_obl_rc_act), mavutil.mavlink.MAV_PARAM_TYPE_INT32),
-            ("COM_OF_LOSS_T", float(com_of_loss_t), mavutil.mavlink.MAV_PARAM_TYPE_REAL32),
-            ("COM_RC_IN_MODE", int_to_float_bits(com_rc_in_mode), mavutil.mavlink.MAV_PARAM_TYPE_INT32),
-        ]
-        for name, value, ptype in params:
-            with self._mav_lock:
-                self.mav.mav.param_set_send(
-                    self.target_system, self.target_component,
-                    name.encode(), value, ptype,
-                )
-            human = (
-                struct.unpack("<i", struct.pack("<f", value))[0]
-                if ptype == mavutil.mavlink.MAV_PARAM_TYPE_INT32
-                else value
-            )
-            logger.info(f"param {name} = {human}")
-            await asyncio.sleep(0.1)
+        return await self._commands.apply_safe_params(
+            com_rcl_except=com_rcl_except,
+            com_obl_rc_act=com_obl_rc_act,
+            com_of_loss_t=com_of_loss_t,
+            com_rc_in_mode=com_rc_in_mode,
+        )
 
     async def wait_until_ready(self, timeout_s: float = 60.0):
         """Block until EKF reports a fresh LOCAL_POSITION_NED."""
@@ -620,135 +559,20 @@ class DroneController:
             self._streamer_thread.join(timeout=2.0)
             self._streamer_thread = None
 
-    async def send_command_long(
-        self,
-        cmd_id: int,
-        param1: float = 0.0,
-        param2: float = 0.0,
-        param3: float = 0.0,
-        param4: float = 0.0,
-        param5: float = 0.0,
-        param6: float = 0.0,
-        param7: float = 0.0,
-        timeout_s: float = 2.0,
-        confirmation: int = 0,
-    ) -> bool:
+    async def send_command_long(self, *args, **kwargs) -> bool:
         """Send MAV_CMD_<cmd_id> via COMMAND_LONG and await the terminal ACK.
 
-        IN_PROGRESS resets the deadline by ``timeout_s``; terminal non-ACCEPTED
-        results raise ``DroneError``. A duplicate in-flight command with the
-        same (cmd_id, target_sys, target_comp) raises immediately.
+        Delegates to CommandSender. IN_PROGRESS extends the deadline; terminal
+        non-ACCEPTED results raise DroneError; a duplicate in-flight command
+        raises immediately.
         """
-        if self._ack_loop is None:
-            self._ack_loop = asyncio.get_running_loop()
+        return await self._commands.send_command_long(*args, **kwargs)
 
-        key = (cmd_id, self.target_system, self.target_component)
-        with self._pending_acks_lock:
-            if key in self._pending_acks:
-                raise DroneError(f"duplicate in-flight command: cmd_id={cmd_id}")
-            fut: asyncio.Future = self._ack_loop.create_future()
-            self._pending_acks[key] = {
-                "future": fut,
-                "base_timeout": timeout_s,
-                "deadline": time.monotonic() + timeout_s,
-            }
-
-        try:
-            if self._mock:
-                if not fut.done():
-                    fut.set_result(True)
-            elif self.mav is not None:
-                with self._mav_lock:
-                    self.mav.mav.command_long_send(
-                        self.target_system, self.target_component,
-                        cmd_id,
-                        confirmation,
-                        param1, param2, param3, param4, param5, param6, param7,
-                    )
-
-            while True:
-                with self._pending_acks_lock:
-                    entry = self._pending_acks.get(key)
-                    if entry is None:
-                        break
-                    remaining = entry["deadline"] - time.monotonic()
-                if remaining <= 0:
-                    raise DroneError(f"COMMAND_ACK timeout for cmd_id={cmd_id}")
-                try:
-                    return await asyncio.wait_for(asyncio.shield(fut), timeout=remaining)
-                except asyncio.TimeoutError:
-                    continue
-            return fut.result()
-        except DroneError:
-            raise
-        except Exception as e:
-            raise DroneError(f"send_command_long failed: {e}") from e
-        finally:
-            with self._pending_acks_lock:
-                self._pending_acks.pop(key, None)
-
-    async def _set_mode(
-        self,
-        custom_main_mode: int,
-        custom_sub_mode: int = 0,
-        wait_for_confirm_s: float = 3.0,
-    ) -> bool:
-        if self._mock:
-            with self._tel_lock:
-                self._tel["main_mode"] = custom_main_mode
-                self._tel["sub_mode"] = custom_sub_mode
-            logger.info(f"[MOCK] Mode → main={custom_main_mode} sub={custom_sub_mode}")
-            await asyncio.sleep(0.05)
-            return True
-        with self._mav_lock:
-            self.mav.mav.command_long_send(
-                self.target_system, self.target_component,
-                mavutil.mavlink.MAV_CMD_DO_SET_MODE,
-                0,
-                float(mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED),
-                float(custom_main_mode),
-                float(custom_sub_mode),
-                0, 0, 0, 0,
-            )
-        start = time.time()
-        while time.time() - start < wait_for_confirm_s:
-            await asyncio.sleep(0.1)
-            if self.get_main_mode() == custom_main_mode and (
-                custom_sub_mode == 0 or self.get_sub_mode() == custom_sub_mode
-            ):
-                logger.info(f"Mode → main={custom_main_mode} sub={custom_sub_mode}")
-                return True
-        logger.warning(
-            f"Mode change timeout: requested main={custom_main_mode} sub={custom_sub_mode}, "
-            f"actual main={self.get_main_mode()} sub={self.get_sub_mode()}"
-        )
-        return False
+    async def _set_mode(self, *args, **kwargs) -> bool:
+        return await self._commands.set_mode(*args, **kwargs)
 
     async def _send_arm(self, arm: bool, force: bool = False, timeout_s: float = 5.0) -> bool:
-        if self._mock:
-            with self._tel_lock:
-                self._tel["armed"] = arm
-            logger.info(f"[MOCK] {'Armed' if arm else 'Disarmed'}")
-            await asyncio.sleep(0.05)
-            return True
-        param1 = 1.0 if arm else 0.0
-        param2 = 21196.0 if force else 0.0
-        with self._mav_lock:
-            self.mav.mav.command_long_send(
-                self.target_system, self.target_component,
-                mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-                0,
-                param1, param2,
-                0, 0, 0, 0, 0,
-            )
-        start = time.time()
-        while time.time() - start < timeout_s:
-            await asyncio.sleep(0.1)
-            if self.is_armed() == arm:
-                logger.info(f"{'Armed' if arm else 'Disarmed'} (after {time.time() - start:.1f}s)")
-                return True
-        logger.error(f"{'Arm' if arm else 'Disarm'} timeout")
-        return False
+        return await self._commands.send_arm(arm=arm, force=force, timeout_s=timeout_s)
 
     async def arm(self, timeout_s: float = 10.0) -> bool:
         if self.is_armed():
