@@ -23,6 +23,7 @@ from .constants import (
 )
 from ._commands import CommandSender
 from ._connection import MAVLinkConnection
+from ._mission import MissionOps
 from ._streamer import OffboardStreamer
 from ._telemetry import Telemetry
 from .errors import DroneError
@@ -126,6 +127,7 @@ class DroneController:
             stop_event=self._stop_event,
             proc_start_monotonic=self._proc_start_monotonic,
         )
+        self._mission = MissionOps(self)
 
     # ---- MAVLink connection shims (Phase 3) -------------------------------
     # The pymavlink connection, the I/O lock, and target sysid live inside
@@ -509,224 +511,41 @@ class DroneController:
         return await self._commands.send_arm(arm=arm, force=force, timeout_s=timeout_s)
 
     async def arm(self, timeout_s: float = 10.0) -> bool:
-        if self.is_armed():
-            logger.info("Already armed")
-            return True
-        self._viz_publish_command("arm")
-        logger.info("Arming...")
-        return await self._send_arm(arm=True, timeout_s=timeout_s)
+        return await self._mission.arm(timeout_s=timeout_s)
 
     async def disarm(self, force: bool = False, timeout_s: float = 5.0) -> bool:
-        if not self.is_armed():
-            logger.info("Already disarmed")
-            return True
-        self._viz_publish_command("disarm", force=force)
-        logger.info(f"Disarming{' (FORCED)' if force else ''}...")
-        return await self._send_arm(arm=False, force=force, timeout_s=timeout_s)
+        return await self._mission.disarm(force=force, timeout_s=timeout_s)
 
     def _check_watchdog(self) -> None:
-        if self._watchdog_tripped:
-            raise DroneError(
-                "telemetry lost: streamer watchdog tripped — call emergency_land()"
-            )
+        self._mission.check_watchdog()
 
     async def takeoff(self, altitude_m: float, timeout_s: float = 30.0) -> bool:
-        """Arm the vehicle, enter OFFBOARD mode, and climb to altitude_m.
+        """Arm the vehicle, enter OFFBOARD mode, and climb to altitude_m."""
+        return await self._mission.takeoff(altitude_m, timeout_s=timeout_s)
 
-        Order: start setpoint stream → arm → set OFFBOARD → wait position.
-        PX4 firmware ≥1.13 can refuse arm-in-OFFBOARD; arming first is the
-        canonical sequence.
-        """
-        self._check_watchdog()
-        logger.info(f"Takeoff to {altitude_m} m")
-        pos = self.get_local_position()
-        yaw = self.get_yaw_rad()
-        self._viz_publish_command(
-            "takeoff",
-            altitude_m=altitude_m,
-            from_pos={"x": pos.x, "y": pos.y, "z": pos.z},
-            target={"x": pos.x, "y": pos.y, "z": pos.z - altitude_m},
-            timeout_s=timeout_s,
-        )
-
-        # 1. Start streaming current position as the setpoint, so PX4 sees
-        #    a fresh setpoint stream before any mode/arm transition.
-        self._set_setpoint_position(pos.x, pos.y, pos.z, yaw)
-        self._ensure_streamer_started()
-        await asyncio.sleep(1.5)  # let PX4 see ~75 setpoints before any state change
-
-        # 2. Arm first — must precede OFFBOARD on PX4 ≥1.13.
-        if not self.is_armed():
-            if not await self.arm():
-                raise DroneError("Arm failed")
-
-        # 3. Enter OFFBOARD now that we're armed and streaming.
-        if not await self._set_mode(PX4_CUSTOM_MAIN_MODE_OFFBOARD):
-            raise DroneError("Failed to enter OFFBOARD")
-
-        # 4. Command the climb setpoint and wait for it.
-        pos2 = self.get_local_position()
-        target_z = pos2.z - altitude_m
-        self._set_setpoint_position(pos2.x, pos2.y, target_z, self.get_yaw_rad())
-
-        return await self._wait_position_reached(
-            pos2.x, pos2.y, target_z,
-            timeout_s=timeout_s,
-            xy_tol=2.0,
-            z_tol=0.5,
-        )
-
-    async def goto(
-        self,
-        x: float,
-        y: float,
-        z: float,
-        yaw_deg: Optional[float] = None,
-        timeout_s: float = 30.0,
-        hover_time_s: float = 2.0,
-        xy_tol_m: float = 0.5,
-        z_tol_m: float = 0.5,
-    ) -> bool:
+    async def goto(self, *args, **kwargs) -> bool:
         """Fly to an absolute NED position. Requires OFFBOARD + armed."""
-        self._check_watchdog()
-        if not self.is_offboard():
-            raise DroneError(
-                f"goto() requires OFFBOARD mode, current main_mode={self.get_main_mode()}"
-            )
-        if not self.is_armed():
-            raise DroneError("goto() requires armed")
-
-        yaw_rad = math.radians(yaw_deg) if yaw_deg is not None else None
-        from_pos = self.get_local_position()
-
-        self._viz_publish_command(
-            "goto",
-            from_pos={"x": from_pos.x, "y": from_pos.y, "z": from_pos.z},
-            target={"x": x, "y": y, "z": z},
-            yaw_deg=yaw_deg,
-            timeout_s=timeout_s,
-            hover_time_s=hover_time_s,
-        )
-        logger.info(
-            f"goto NED=({x:.2f}, {y:.2f}, {z:.2f}) "
-            f"yaw={yaw_deg if yaw_deg is not None else 'face-travel-dir'}"
-        )
-
-        if yaw_rad is None:
-            dx = x - from_pos.x
-            dy = y - from_pos.y
-            dist_xy = math.hypot(dx, dy)
-            if dist_xy > 0.05:
-                heading = math.atan2(dy, dx)
-                try:
-                    self._ensure_streamer_started()
-                except DroneError:
-                    logger.warning("Could not start streamer for pre-yaw; proceeding to move")
-                    heading = None
-
-                if heading is not None:
-                    current_yaw = self.get_yaw_rad()
-                    yaw_err = math.degrees(abs(math.atan2(math.sin(heading - current_yaw), math.cos(heading - current_yaw))))
-                    deg_per_sec = math.degrees(self.yaw_slew_rate_rad) if self.yaw_slew_rate_rad > 0 else 30.0
-                    yaw_timeout = min(60.0, max(2.0, yaw_err / max(1e-3, deg_per_sec) + 2.0))
-                    ok = await self.set_yaw(math.degrees(heading), timeout_s=yaw_timeout)
-                    if not ok:
-                        logger.warning("Pre-yaw timed out; proceeding to move toward target")
-
-        try:
-            self._ensure_streamer_started()
-        except DroneError:
-            raise DroneError("Cannot start offboard streamer before goto()")
-
-        self._set_setpoint_position(x, y, z, yaw_rad)
-
-        reached = await self._wait_position_reached(x, y, z, timeout_s, xy_tol_m, z_tol_m)
-
-        if hover_time_s > 0:
-            logger.info(f"Hovering for {hover_time_s}s")
-            self._viz_publish_command("hover", duration_s=hover_time_s)
-            await asyncio.sleep(hover_time_s)
-
-        return reached
+        return await self._mission.goto(*args, **kwargs)
 
     async def goto_relative(self, dx: float, dy: float, dz: float, yaw_deg: Optional[float] = None, **kwargs) -> bool:
         """Fly to a position offset from the current NED position."""
-        pos = self.get_local_position()
-        return await self.goto(pos.x + dx, pos.y + dy, pos.z + dz, yaw_deg=yaw_deg, **kwargs)
+        return await self._mission.goto_relative(dx, dy, dz, yaw_deg=yaw_deg, **kwargs)
 
     async def goto_body_relative(self, forward_m: float, right_m: float, down_m: float, yaw_deg: Optional[float] = None, **kwargs) -> bool:
         """Fly to a position offset in body FRD frame (no heading math required)."""
-        pos = self.get_local_position()
-        yaw = self.get_yaw_rad()
-        ned_dx, ned_dy = body_to_ned(forward_m, right_m, yaw)
-        return await self.goto(
-            pos.x + ned_dx, pos.y + ned_dy, pos.z + down_m,
-            yaw_deg=yaw_deg, **kwargs,
-        )
+        return await self._mission.goto_body_relative(forward_m, right_m, down_m, yaw_deg=yaw_deg, **kwargs)
 
     async def hover(self, duration_s: float):
         """Hold current position for duration_s seconds."""
-        logger.info(f"Hover {duration_s}s")
-        self._viz_publish_command("hover", duration_s=duration_s)
-        await asyncio.sleep(duration_s)
+        return await self._mission.hover(duration_s)
 
     async def set_yaw(self, yaw_deg: float, timeout_s: float = 10.0) -> bool:
         """Rotate in-place to yaw_deg (degrees, NED convention)."""
-        self._check_watchdog()
-        pos = self.get_local_position()
-        logger.info(f"Yaw → {yaw_deg}°")
-        self._viz_publish_command("set_yaw", yaw_deg=yaw_deg)
-        target_yaw_rad = math.radians(yaw_deg)
-        self._set_setpoint_position(pos.x, pos.y, pos.z, target_yaw_rad)
-
-        start = time.time()
-        err = math.pi
-        while time.time() - start < timeout_s:
-            await asyncio.sleep(0.1)
-            current = self.get_yaw_rad()
-            err = math.atan2(
-                math.sin(target_yaw_rad - current), math.cos(target_yaw_rad - current)
-            )
-            if abs(err) < math.radians(5.0):
-                logger.info(f"Yaw reached (err {math.degrees(err):.1f}°)")
-                return True
-        logger.warning(f"Yaw timeout (err {math.degrees(err):.1f}°)")
-        return False
+        return await self._mission.set_yaw(yaw_deg, timeout_s=timeout_s)
 
     async def land(self, timeout_s: float = 60.0) -> bool:
         """Switch to AUTO_LAND and wait until on-ground."""
-        self._check_watchdog()
-        logger.info("Auto LAND")
-        pos = self.get_local_position()
-        self._viz_publish_command(
-            "land",
-            from_pos={"x": pos.x, "y": pos.y, "z": pos.z},
-        )
-
-        if not await self._set_mode(
-            PX4_CUSTOM_MAIN_MODE_AUTO, PX4_CUSTOM_SUB_MODE_AUTO_LAND,
-        ):
-            logger.warning("Land mode change rejected — sending MAV_CMD_NAV_LAND directly")
-            with self._mav_lock:
-                self.mav.mav.command_long_send(
-                    self.target_system, self.target_component,
-                    mavutil.mavlink.MAV_CMD_NAV_LAND,
-                    0, 0, 0, 0, 0, 0, 0, 0,
-                )
-
-        self._stop_streamer()
-
-        start = time.time()
-        while time.time() - start < timeout_s:
-            await asyncio.sleep(0.5)
-            if self.landed_state() == 1:
-                logger.info("Landed")
-                return True
-            if not self.is_armed():
-                logger.info("Auto-disarmed after land")
-                return True
-        logger.warning("Land timeout")
-        return False
+        return await self._mission.land(timeout_s=timeout_s)
 
     async def precision_land(
         self,
@@ -886,93 +705,16 @@ class DroneController:
 
     async def return_to_launch(self, timeout_s: float = 120.0) -> bool:
         """Switch to AUTO_RTL and wait until landed."""
-        self._check_watchdog()
-        logger.info("Return to Launch")
-        pos = self.get_local_position()
-        self._viz_publish_command(
-            "rtl",
-            from_pos={"x": pos.x, "y": pos.y, "z": pos.z},
-            target={"x": 0.0, "y": 0.0, "z": 0.0},
-        )
-        if not await self._set_mode(
-            PX4_CUSTOM_MAIN_MODE_AUTO, PX4_CUSTOM_SUB_MODE_AUTO_RTL,
-        ):
-            return False
-
-        self._stop_streamer()
-
-        start = time.time()
-        while time.time() - start < timeout_s:
-            await asyncio.sleep(0.5)
-            # Must be ON_GROUND AND disarmed. Disarm-in-air without landing is
-            # a kill-switch / failsafe; the vehicle is NOT at the launch site.
-            if self.landed_state() == 1 and not self.is_armed():
-                logger.info("RTL complete")
-                return True
-        logger.warning("RTL timeout")
-        return False
+        return await self._mission.return_to_launch(timeout_s=timeout_s)
 
     async def emergency_land(self) -> None:
-        """Best-effort land. Chains AUTO_LAND → MAV_CMD_NAV_LAND → FLIGHT_TERMINATION.
+        """Best-effort land: AUTO_LAND → MAV_CMD_NAV_LAND → FLIGHT_TERMINATION.
 
-        Semantics: "land NOW, where the drone currently is". Intentionally
-        does NOT attempt RTL — that's a separate concern handled by
-        return_to_launch(). A failed AUTO_LAND signals a serious problem
-        (loss of comm, EKF fail) under which RTL is even less likely to
-        succeed.
-
-        Phase 2 wiring: this method intentionally IGNORES the
-        _watchdog_tripped flag. The flag is set when telemetry is lost; the
-        watchdog's job is precisely to surface an error that callers handle
-        by invoking emergency_land. If emergency_land also raised on the
-        flag, the safety path would self-cancel.
+        Lands NOW, where the drone is; does NOT attempt RTL. Intentionally
+        ignores the telemetry watchdog flag — it is the recovery path the
+        watchdog is meant to trigger.
         """
-        logger.error("EMERGENCY LAND")
-        self._viz_publish_command("emergency_land")
-
-        # Step 1: try AUTO_LAND mode change + wait up to 10s for touchdown.
-        try:
-            landed = await self.land(timeout_s=10.0)
-        except Exception as e:
-            logger.error(f"land() raised during emergency_land: {e}")
-            landed = False
-
-        if landed or not self.is_armed():
-            return
-
-        # Step 2: AUTO_LAND timed out. Try MAV_CMD_NAV_LAND directly
-        # (sometimes accepted when the mode-switch is stuck).
-        if not self._mock and self.mav is not None:
-            logger.warning("AUTO_LAND timed out — sending MAV_CMD_NAV_LAND command")
-            try:
-                with self._mav_lock:
-                    self.mav.mav.command_long_send(
-                        self.target_system, self.target_component,
-                        mavutil.mavlink.MAV_CMD_NAV_LAND,
-                        0, 0, 0, 0, 0, 0, 0, 0,
-                    )
-            except Exception as e:
-                logger.error(f"NAV_LAND command send failed: {e}")
-
-        # Wait 5 s for landing to happen via the command.
-        deadline = time.time() + 5.0
-        while time.time() < deadline:
-            if self.landed_state() == 1 or not self.is_armed():
-                return
-            await asyncio.sleep(0.2)
-
-        # Step 3: still in the air. Last resort — flight termination.
-        if not self._mock and self.mav is not None:
-            logger.error("Land and NAV_LAND both timed out — sending DO_FLIGHTTERMINATION")
-            try:
-                with self._mav_lock:
-                    self.mav.mav.command_long_send(
-                        self.target_system, self.target_component,
-                        mavutil.mavlink.MAV_CMD_DO_FLIGHTTERMINATION,
-                        0, 1, 0, 0, 0, 0, 0, 0,
-                    )
-            except Exception as e:
-                logger.error(f"DO_FLIGHTTERMINATION send failed: {e}")
+        return await self._mission.emergency_land()
 
     def _viz_publish_command(self, command: str, **payload):
         if self._viz is None:
@@ -1019,21 +761,4 @@ class DroneController:
             pass
 
     async def _wait_position_reached(self, x: float, y: float, z: float, timeout_s: float, xy_tol: float = 0.5, z_tol: float = 0.5) -> bool:
-        start = time.time()
-        while time.time() - start < timeout_s:
-            if self._shutdown_requested:
-                raise DroneError("shutdown requested")
-            await asyncio.sleep(0.2)
-            pos = self.get_local_position()
-            dxy = math.hypot(pos.x - x, pos.y - y)
-            dz = abs(pos.z - z)
-            if dxy < xy_tol and dz < z_tol:
-                logger.info(
-                    f"Reached ({pos.x:.2f},{pos.y:.2f},{pos.z:.2f}), err xy={dxy:.2f} z={dz:.2f}"
-                )
-                return True
-        pos = self.get_local_position()
-        logger.warning(
-            f"Position timeout: target=({x:.2f},{y:.2f},{z:.2f}) current=({pos.x:.2f},{pos.y:.2f},{pos.z:.2f})"
-        )
-        return False
+        return await self._mission.wait_position_reached(x, y, z, timeout_s, xy_tol, z_tol)
