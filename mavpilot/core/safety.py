@@ -11,7 +11,7 @@ import asyncio
 import logging
 import time
 
-from .errors import DroneError
+from ..errors import DroneError
 
 logger = logging.getLogger("drone")
 

@@ -16,8 +16,8 @@ import time
 
 from pymavlink import mavutil
 
-from .constants import DEFAULT_POS_TYPE_MASK
-from .errors import DroneError
+from ..constants import DEFAULT_POS_TYPE_MASK
+from ..errors import DroneError
 
 logger = logging.getLogger("drone")
 

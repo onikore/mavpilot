@@ -44,4 +44,7 @@ graphify-out/
 .claude/
 .codex/
 CLAUDE.md
-docs/
+# Internal planning docs (superpowers plans/specs) stay out of the repo.
+docs/superpowers/
+# Generated API docs (built by pdoc in CI / scripts/build_docs.sh).
+docs/api/

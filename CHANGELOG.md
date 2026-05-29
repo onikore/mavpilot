@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.2 — 2026-05-29
+
+### Docs
+- English `README.md` is now the primary readme; the Russian translation moved
+  to `README.ru.md` (language switcher links updated both ways).
+- Auto-generated API documentation via [pdoc](https://pdoc.dev/), built from
+  the source docstrings — `scripts/build_docs.sh` locally, and a new `Docs`
+  GitHub Actions workflow that deploys to GitHub Pages on `main` and `v*` tags.
+- A real `docs/` folder is now tracked (only `docs/superpowers/` planning notes
+  and the generated `docs/api/` output stay git-ignored).
+
+## 0.2.1 — 2026-05-29
+
+### Internal
+- Moved the eight internal collaborator modules into a `mavpilot/core/`
+  subpackage (`connection`, `telemetry`, `commands`, `streamer`, `mission`,
+  `precision_land`, `safety`, `mock`) to declutter the top-level package.
+  No public API change — `mavpilot`, `mavpilot.controller`, `mavpilot.errors`,
+  `mavpilot.types`, `mavpilot.utils`, and `mavpilot.viz` are unchanged.
+- CI: PyPI publish now triggers only on `v*` tags and requires the test job
+  to pass first.
+
 ## 0.2.0 — 2026-05-29
 
 ### Breaking changes

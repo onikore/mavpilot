@@ -13,4 +13,4 @@ from .controller import DroneController
 from .errors import DroneError
 from .types import MarkerObservation, Position, PrecisionLandResult, PrecisionLandStatus
 
-__version__ = "0.2.0"
+__version__ = "0.2.2"

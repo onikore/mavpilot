@@ -16,7 +16,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from .constants import (
+from ..constants import (
     PX4_CUSTOM_MAIN_MODE_AUTO,
     PX4_CUSTOM_MAIN_MODE_OFFBOARD,
     PX4_CUSTOM_SUB_MODE_AUTO_LAND,

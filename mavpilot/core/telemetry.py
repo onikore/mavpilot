@@ -18,12 +18,12 @@ from typing import TYPE_CHECKING
 
 from pymavlink import mavutil
 
-from .constants import ACK_RESULT_NAMES, PX4_CUSTOM_MAIN_MODE_OFFBOARD
-from .types import Position
-from .utils import normalize_yaw_deg
+from ..constants import ACK_RESULT_NAMES, PX4_CUSTOM_MAIN_MODE_OFFBOARD
+from ..types import Position
+from ..utils import normalize_yaw_deg
 
 if TYPE_CHECKING:
-    from .viz import VizServer
+    from ..viz import VizServer
 
 logger = logging.getLogger("drone")
 

@@ -18,14 +18,14 @@ import time
 
 from pymavlink import mavutil
 
-from .constants import (
+from ..constants import (
     PX4_CUSTOM_MAIN_MODE_AUTO,
     PX4_CUSTOM_MAIN_MODE_OFFBOARD,
     PX4_CUSTOM_SUB_MODE_AUTO_LAND,
     PX4_CUSTOM_SUB_MODE_AUTO_RTL,
 )
-from .errors import DroneError
-from .utils import body_to_ned
+from ..errors import DroneError
+from ..utils import body_to_ned
 
 logger = logging.getLogger("drone")
 
