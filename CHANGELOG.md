@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.3 — 2026-05-29
+
+### Docs
+- Expanded docstrings across the public API so the generated reference is
+  description-rich rather than bare signatures: full Google-style
+  Args/Returns/Raises (plus examples) on `DroneController` and all its methods,
+  field-level docs on `Position`/`MarkerObservation`/`PrecisionLandResult` and
+  the `PrecisionLandStatus` members, and thorough `mavpilot.utils` docs.
+- `goto`, `precision_land`, and `send_command_long` now have explicit
+  signatures (were `*args, **kwargs`), so the docs and editor autocomplete show
+  their real parameters.
+- The docs build now also renders `mavpilot.utils`; internal `mavpilot.core.*`
+  stays hidden via the package's `__all__`.
+
 ## 0.2.2 — 2026-05-29
 
 ### Docs
