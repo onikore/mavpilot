@@ -1,11 +1,18 @@
 """Unit tests for VizServer publish/JSON encoding behaviour.
 
-These tests do NOT bind a real port. They poke `publish()` directly and
-inspect the per-client queue.
+Most tests do NOT bind a real port — they poke `publish()` directly and
+inspect the per-client queue. The cap/shutdown tests at the end do bind.
 """
+
+import contextlib
 import json
 import math
 import queue
+import socket
+import threading
+import time
+import urllib.error
+import urllib.request
 
 from mavpilot.viz import VizServer
 
@@ -82,13 +89,6 @@ def test_viz_server_explicit_host_passed_through():
     assert v.host == "0.0.0.0"
 
 
-import socket
-import threading
-import time
-import urllib.error
-import urllib.request
-
-
 def _free_port() -> int:
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
@@ -113,6 +113,7 @@ def test_max_clients_cap_returns_503():
                 r.read(20)  # read a chunk
             except Exception as e:
                 responses.append(e)
+
         for _ in range(2):
             t = threading.Thread(target=open_sse, daemon=True)
             t.start()
@@ -136,11 +137,11 @@ def test_stop_unblocks_sse_workers_quickly():
     v = VizServer(port=port)
     v.start()
     try:
+
         def open_sse():
-            try:
+            with contextlib.suppress(Exception):
                 urllib.request.urlopen(f"http://127.0.0.1:{port}/events", timeout=1.0).read(20)
-            except Exception:
-                pass
+
         t = threading.Thread(target=open_sse, daemon=True)
         t.start()
         time.sleep(0.3)  # let it register
@@ -149,7 +150,5 @@ def test_stop_unblocks_sse_workers_quickly():
         elapsed = time.monotonic() - stop_start
         assert elapsed < 2.0, f"stop() took {elapsed:.2f}s; expected <2s"
     finally:
-        try:
+        with contextlib.suppress(Exception):
             v.stop()
-        except Exception:
-            pass

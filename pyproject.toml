@@ -58,13 +58,24 @@ line-length = 100
 [tool.ruff]
 line-length = 100
 
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "SIM"]
+ignore = [
+    "S101",  # asserts ok in tests
+    "S311",  # standard random ok for test fixtures
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "S104"]  # asserts + 0.0.0.0 host literal are fine in tests
+"mavpilot/cli.py" = ["BLE001"]  # the BaseException catch is intentional safety
+
 [tool.mypy]
 python_version = "3.10"
 warn_unused_configs = true
 ignore_missing_imports = true
-# pymavlink is untyped; relax checks that surface false positives from it.
-warn_return_any = false
-disable_error_code = ["union-attr", "assignment"]
+warn_return_any = true
+# Per-file ignores for pymavlink-touching code can be added with
+# `# type: ignore[union-attr]` comments at the specific line.
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

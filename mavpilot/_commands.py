@@ -6,14 +6,16 @@ telemetry layer forwards COMMAND_ACK frames to ``route_command_ack`` from the
 receiver thread; ``send_command_long`` awaits the resulting Future with an
 IN_PROGRESS-extendable deadline.
 """
+
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import struct
 import threading
 import time
-from typing import Callable, Optional, Tuple
+from collections.abc import Callable
 
 from pymavlink import mavutil
 
@@ -30,7 +32,7 @@ class CommandSender:
         connection,
         telemetry,
         mock: bool,
-        get_target: Callable[[], Tuple[int, int]],
+        get_target: Callable[[], tuple[int, int]],
     ) -> None:
         self._connection = connection
         self._telemetry = telemetry
@@ -38,7 +40,7 @@ class CommandSender:
         self._get_target = get_target
         self._pending_acks: dict[tuple[int, int, int], dict] = {}
         self._pending_acks_lock = threading.Lock()
-        self._ack_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._ack_loop: asyncio.AbstractEventLoop | None = None
 
     @property
     def target_system(self) -> int:
@@ -79,10 +81,9 @@ class CommandSender:
                 name = ACK_RESULT_NAMES.get(result, str(result))
                 fut.set_exception(DroneError(f"cmd_id={command} ACK={name}"))
 
-        try:
+        # Loop may be closed during shutdown — drop silently.
+        with contextlib.suppress(RuntimeError):
             self._ack_loop.call_soon_threadsafe(_set)
-        except RuntimeError:
-            pass
 
     async def send_command_long(
         self,
@@ -125,10 +126,17 @@ class CommandSender:
             elif self._connection is not None and self._connection.mav is not None:
                 self._connection.send(
                     "command_long_send",
-                    tgt_sys, tgt_comp,
+                    tgt_sys,
+                    tgt_comp,
                     cmd_id,
                     confirmation,
-                    param1, param2, param3, param4, param5, param6, param7,
+                    param1,
+                    param2,
+                    param3,
+                    param4,
+                    param5,
+                    param6,
+                    param7,
                 )
 
             while True:
@@ -143,7 +151,7 @@ class CommandSender:
                     return await asyncio.wait_for(asyncio.shield(fut), timeout=remaining)
                 except asyncio.TimeoutError:
                     continue
-            return fut.result()
+            return fut.result()  # type: ignore[no-any-return]
         except DroneError:
             raise
         except Exception as e:
@@ -169,13 +177,17 @@ class CommandSender:
         tgt_sys, tgt_comp = self._get_target()
         self._connection.send(
             "command_long_send",
-            tgt_sys, tgt_comp,
+            tgt_sys,
+            tgt_comp,
             mavutil.mavlink.MAV_CMD_DO_SET_MODE,
             0,
             float(mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED),
             float(custom_main_mode),
             float(custom_sub_mode),
-            0, 0, 0, 0,
+            0,
+            0,
+            0,
+            0,
         )
         start = time.time()
         while time.time() - start < wait_for_confirm_s:
@@ -204,11 +216,17 @@ class CommandSender:
         tgt_sys, tgt_comp = self._get_target()
         self._connection.send(
             "command_long_send",
-            tgt_sys, tgt_comp,
+            tgt_sys,
+            tgt_comp,
             mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
             0,
-            param1, param2,
-            0, 0, 0, 0, 0,
+            param1,
+            param2,
+            0,
+            0,
+            0,
+            0,
+            0,
         )
         start = time.time()
         while time.time() - start < timeout_s:
@@ -228,22 +246,39 @@ class CommandSender:
     ) -> None:
         """Write recommended PX4 safety parameters for offboard missions."""
         if self._mock:
-            logger.info(f"[MOCK] apply_safe_params: rcl_except={com_rcl_except}, "
-                        f"obl_rc_act={com_obl_rc_act}, of_loss_t={com_of_loss_t}, "
-                        f"rc_in_mode={com_rc_in_mode} (no-op)")
+            logger.info(
+                f"[MOCK] apply_safe_params: rcl_except={com_rcl_except}, "
+                f"obl_rc_act={com_obl_rc_act}, of_loss_t={com_of_loss_t}, "
+                f"rc_in_mode={com_rc_in_mode} (no-op)"
+            )
             return
         tgt_sys, tgt_comp = self._get_target()
         params = [
-            ("COM_RCL_EXCEPT", int_to_float_bits(com_rcl_except), mavutil.mavlink.MAV_PARAM_TYPE_INT32),
-            ("COM_OBL_RC_ACT", int_to_float_bits(com_obl_rc_act), mavutil.mavlink.MAV_PARAM_TYPE_INT32),
+            (
+                "COM_RCL_EXCEPT",
+                int_to_float_bits(com_rcl_except),
+                mavutil.mavlink.MAV_PARAM_TYPE_INT32,
+            ),
+            (
+                "COM_OBL_RC_ACT",
+                int_to_float_bits(com_obl_rc_act),
+                mavutil.mavlink.MAV_PARAM_TYPE_INT32,
+            ),
             ("COM_OF_LOSS_T", float(com_of_loss_t), mavutil.mavlink.MAV_PARAM_TYPE_REAL32),
-            ("COM_RC_IN_MODE", int_to_float_bits(com_rc_in_mode), mavutil.mavlink.MAV_PARAM_TYPE_INT32),
+            (
+                "COM_RC_IN_MODE",
+                int_to_float_bits(com_rc_in_mode),
+                mavutil.mavlink.MAV_PARAM_TYPE_INT32,
+            ),
         ]
         for name, value, ptype in params:
             self._connection.send(
                 "param_set_send",
-                tgt_sys, tgt_comp,
-                name.encode(), value, ptype,
+                tgt_sys,
+                tgt_comp,
+                name.encode(),
+                value,
+                ptype,
             )
             human = (
                 struct.unpack("<i", struct.pack("<f", value))[0]
@@ -270,10 +305,16 @@ class CommandSender:
             interval_us = int(1e6 / hz)
             self._connection.send(
                 "command_long_send",
-                tgt_sys, tgt_comp,
+                tgt_sys,
+                tgt_comp,
                 mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
                 0,
-                float(msg_id), float(interval_us),
-                0, 0, 0, 0, 0,
+                float(msg_id),
+                float(interval_us),
+                0,
+                0,
+                0,
+                0,
+                0,
             )
             await asyncio.sleep(0.05)

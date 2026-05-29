@@ -6,13 +6,13 @@ to update the target; ``start`` spins up the publisher thread (no-op send in
 mock mode); ``watchdog_tripped`` latches True after telemetry_watchdog_s of
 LOCAL_POSITION_NED silence.
 """
+
 from __future__ import annotations
 
 import logging
 import math
 import threading
 import time
-from typing import Optional
 
 from pymavlink import mavutil
 
@@ -56,7 +56,7 @@ class OffboardStreamer:
             "type_mask": DEFAULT_POS_TYPE_MASK,
         }
         self._streaming = False
-        self._streamer_thread: Optional[threading.Thread] = None
+        self._streamer_thread: threading.Thread | None = None
         self.watchdog_tripped = False
 
     @property
@@ -72,7 +72,7 @@ class OffboardStreamer:
         x: float,
         y: float,
         z: float,
-        yaw_rad: Optional[float] = None,
+        yaw_rad: float | None = None,
     ) -> None:
         with self._setpoint_lock:
             self._setpoint["x"] = x
@@ -126,34 +126,46 @@ class OffboardStreamer:
                                 if abs(yaw_err) <= max_step:
                                     self._setpoint["yaw"] = target_yaw
                                 else:
-                                    self._setpoint["yaw"] = prev_yaw + math.copysign(max_step, yaw_err)
+                                    self._setpoint["yaw"] = prev_yaw + math.copysign(
+                                        max_step, yaw_err
+                                    )
                         sp = dict(self._setpoint)
                     if not self._mock:
-                        tb_ms = int((time.monotonic() - self._proc_start_monotonic) * 1e3) & 0xFFFFFFFF
+                        tb_ms = (
+                            int((time.monotonic() - self._proc_start_monotonic) * 1e3) & 0xFFFFFFFF
+                        )
                         self._connection.send(
                             "set_position_target_local_ned_send",
                             tb_ms,
-                            self._connection.target_system, self._connection.target_component,
+                            self._connection.target_system,
+                            self._connection.target_component,
                             mavutil.mavlink.MAV_FRAME_LOCAL_NED,
                             sp["type_mask"],
-                            sp["x"], sp["y"], sp["z"],
-                            sp["vx"], sp["vy"], sp["vz"],
-                            0.0, 0.0, 0.0,
-                            sp["yaw"], 0.0,
+                            sp["x"],
+                            sp["y"],
+                            sp["z"],
+                            sp["vx"],
+                            sp["vy"],
+                            sp["vz"],
+                            0.0,
+                            0.0,
+                            0.0,
+                            sp["yaw"],
+                            0.0,
                         )
                 except Exception as e:
                     logger.warning(f"streamer error: {e}")
                 time.sleep(self.loop_period)
                 with tel._lock:
                     last_ts = tel._tel["last_local_pos_ts"]
-                if last_ts > 0 and (time.time() - last_ts) > self.telemetry_watchdog_s:
-                    if not self.watchdog_tripped:
-                        logger.error(
-                            f"telemetry watchdog tripped: no LOCAL_POSITION_NED "
-                            f"for {time.time() - last_ts:.1f}s "
-                            f"(threshold {self.telemetry_watchdog_s}s)"
-                        )
-                        self.watchdog_tripped = True
+                stale = last_ts > 0 and (time.time() - last_ts) > self.telemetry_watchdog_s
+                if stale and not self.watchdog_tripped:
+                    logger.error(
+                        f"telemetry watchdog tripped: no LOCAL_POSITION_NED "
+                        f"for {time.time() - last_ts:.1f}s "
+                        f"(threshold {self.telemetry_watchdog_s}s)"
+                    )
+                    self.watchdog_tripped = True
 
         self._streamer_thread = threading.Thread(target=loop, daemon=True, name="streamer")
         self._streamer_thread.start()

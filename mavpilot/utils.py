@@ -1,12 +1,12 @@
 """Utility functions: bit-casts and coordinate transforms."""
+
 import math
 import struct
-from typing import Tuple
 
 
 def int_to_float_bits(value: int) -> float:
     """Bit-cast int32 -> float for PX4 PARAM_SET INT32 params."""
-    return struct.unpack("<f", struct.pack("<i", int(value)))[0]
+    return float(struct.unpack("<f", struct.pack("<i", int(value)))[0])
 
 
 def pixel_to_body_offset(
@@ -16,7 +16,7 @@ def pixel_to_body_offset(
     camera_vfov_deg: float,
     altitude_above_ground_m: float,
     camera_mount_yaw_deg: float = 0.0,
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
     """Convert normalized pixel offset to body offset in meters.
 
     Pinhole camera model. ``px_norm_x``/``px_norm_y`` are in ``[-1, 1]`` where
@@ -37,7 +37,7 @@ def pixel_to_body_offset(
     return dx, dy
 
 
-def body_to_ned(dx_body: float, dy_body: float, yaw_rad: float) -> Tuple[float, float]:
+def body_to_ned(dx_body: float, dy_body: float, yaw_rad: float) -> tuple[float, float]:
     """Convert body FRD offset to NED offset using current heading."""
     cy = math.cos(yaw_rad)
     sy = math.sin(yaw_rad)
@@ -46,7 +46,7 @@ def body_to_ned(dx_body: float, dy_body: float, yaw_rad: float) -> Tuple[float, 
     return ned_x, ned_y
 
 
-def ned_to_body(ned_dx: float, ned_dy: float, yaw_rad: float) -> Tuple[float, float]:
+def ned_to_body(ned_dx: float, ned_dy: float, yaw_rad: float) -> tuple[float, float]:
     """Convert NED offset to body FRD offset using current heading."""
     cy = math.cos(yaw_rad)
     sy = math.sin(yaw_rad)

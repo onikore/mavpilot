@@ -1,5 +1,7 @@
 """Protocol tests for COMMAND_ACK routing via asyncio.Future."""
+
 import asyncio
+import contextlib
 from types import SimpleNamespace
 
 import pytest
@@ -10,8 +12,10 @@ from mavpilot.errors import DroneError
 
 class _AckMsg:
     """Stand-in for a parsed MAVLink COMMAND_ACK message."""
-    def __init__(self, command: int, result: int, target_system: int = 255,
-                 target_component: int = 1) -> None:
+
+    def __init__(
+        self, command: int, result: int, target_system: int = 255, target_component: int = 1
+    ) -> None:
         self.command = command
         self.result = result
         self.target_system = target_system
@@ -105,10 +109,8 @@ async def test_send_command_duplicate_in_flight_raises():
     with pytest.raises(DroneError, match="duplicate"):
         await d.send_command_long(cmd_id=400, timeout_s=2.0)
     first.cancel()
-    try:
+    with contextlib.suppress(asyncio.CancelledError):
         await first
-    except asyncio.CancelledError:
-        pass
 
 
 @pytest.mark.asyncio

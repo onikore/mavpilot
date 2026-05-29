@@ -1,11 +1,12 @@
 """Visualization server: HTTP + SSE, serves the bundled 3D UI (ES modules)."""
+
+import contextlib
 import json
 import logging
 import queue
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
-from typing import Optional
 
 logger = logging.getLogger("drone")
 
@@ -35,6 +36,7 @@ def _sanitize_for_json(obj):
     traversed.
     """
     import math as _math
+
     if isinstance(obj, float):
         if _math.isnan(obj) or _math.isinf(obj):
             return None
@@ -59,8 +61,8 @@ class VizServer:
         self.max_clients = max_clients
         self._clients_lock = threading.Lock()
         self._clients: list[queue.Queue] = []
-        self._server: Optional[ThreadingHTTPServer] = None
-        self._server_thread: Optional[threading.Thread] = None
+        self._server: ThreadingHTTPServer | None = None
+        self._server_thread: threading.Thread | None = None
 
     def start(self):
         viz_ref = self
@@ -99,10 +101,8 @@ class VizServer:
                         self.send_response(503)
                         self.send_header("Content-Type", "text/plain")
                         self.end_headers()
-                        try:
+                        with contextlib.suppress(Exception):
                             self.wfile.write(b"viz client cap reached\n")
-                        except Exception:
-                            pass
                         return
 
                 self.send_response(200)
@@ -162,16 +162,12 @@ class VizServer:
         # to 15 s for their q.get timeout to expire.
         with self._clients_lock:
             for q in list(self._clients):
-                try:
+                with contextlib.suppress(Exception):
                     q.put_nowait(None)
-                except Exception:
-                    pass
         if self._server is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._server.shutdown()
                 self._server.server_close()
-            except Exception:
-                pass
         with self._clients_lock:
             self._clients.clear()
 

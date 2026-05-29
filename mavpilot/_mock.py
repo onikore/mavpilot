@@ -6,13 +6,15 @@ mock and real links uniformly. MockSimulator runs a background thread that
 integrates a simple kinematic model into the telemetry dict, driven by the
 current setpoint and flight mode.
 """
+
 from __future__ import annotations
 
 import logging
 import math
 import threading
 import time
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 from .constants import (
     PX4_CUSTOM_MAIN_MODE_AUTO,
@@ -41,7 +43,7 @@ class MockMavConnection:
     def send(self, method_name: str, *args, **kwargs) -> None:
         return None
 
-    def recv(self, blocking: bool = True, timeout: float = 0.05) -> Optional[Any]:
+    def recv(self, blocking: bool = True, timeout: float = 0.05) -> Any | None:
         return None
 
     def start_heartbeat(self) -> None:
@@ -59,7 +61,7 @@ class MockSimulator:
 
     def __init__(self, ctx) -> None:
         self._ctx = ctx
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
 
     def start(self) -> None:
         c = self._ctx
@@ -107,10 +109,7 @@ class MockSimulator:
                         tracking = True
                     elif sub_mode == PX4_CUSTOM_SUB_MODE_AUTO_RTL:
                         target_x, target_y = 0.0, 0.0
-                        if math.hypot(cx, cy) < 0.5:
-                            target_z = 0.0
-                        else:
-                            target_z = cz
+                        target_z = 0.0 if math.hypot(cx, cy) < 0.5 else cz
                         tracking = True
                     elif sub_mode == PX4_CUSTOM_SUB_MODE_AUTO_TAKEOFF:
                         target_z = sp["z"] if sp["z"] < cz else cz - 5.0
@@ -148,9 +147,7 @@ class MockSimulator:
                         new_z = target_z
                         vz = dz / dt if dt > 0 else 0.0
 
-                    yaw_err = math.atan2(
-                        math.sin(target_yaw - cyaw), math.cos(target_yaw - cyaw)
-                    )
+                    yaw_err = math.atan2(math.sin(target_yaw - cyaw), math.cos(target_yaw - cyaw))
                     max_yaw_step = max_yaw_rate * dt
                     if abs(yaw_err) > max_yaw_step:
                         new_yaw = cyaw + math.copysign(max_yaw_step, yaw_err)

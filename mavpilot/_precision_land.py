@@ -5,13 +5,14 @@ v0.2.0 safety rules: descent below the floor and AUTO_LAND handoff are allowed
 only with a visible, centered marker. Orchestrates the other collaborators via
 the controller facade (``ctx``).
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
 import math
 import time
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from .errors import DroneError
 from .types import MarkerObservation, PrecisionLandResult, PrecisionLandStatus
@@ -26,7 +27,7 @@ class PrecisionLand:
 
     async def precision_land(
         self,
-        get_marker_offset: Callable[[], Optional[MarkerObservation]],
+        get_marker_offset: Callable[[], MarkerObservation | None],
         descent_rate_mps: float = 0.3,
         final_altitude_m: float = 0.5,
         horizontal_tolerance_m: float = 0.15,
@@ -35,7 +36,7 @@ class PrecisionLand:
         max_horizontal_step_m: float = 1.0,
         marker_lost_timeout_s: float = 3.0,
         min_altitude_floor_m: float = 0.3,
-    ) -> "PrecisionLandResult":
+    ) -> PrecisionLandResult:
         """Vision-guided descent onto a marker.
 
         Returns a PrecisionLandResult describing the terminal outcome.
@@ -80,7 +81,7 @@ class PrecisionLand:
             yaw = c.get_yaw_rad()
             altitude = -pos.z
 
-            obs: Optional[MarkerObservation] = None
+            obs: MarkerObservation | None = None
             try:
                 obs = get_marker_offset()
             except Exception as e:
@@ -115,7 +116,8 @@ class PrecisionLand:
                         )
                         return PrecisionLandResult(
                             status=(
-                                PrecisionLandStatus.LANDED if landed
+                                PrecisionLandStatus.LANDED
+                                if landed
                                 else PrecisionLandStatus.HANDED_OFF
                             ),
                             final_position=c.get_local_position(),
@@ -134,13 +136,15 @@ class PrecisionLand:
                 c._set_setpoint_position(target_x, target_y, target_z, yaw)
 
                 if c._viz is not None:
-                    c._viz.publish({
-                        "type": "marker",
-                        "marker_ned": {"x": pos.x + ned_dx, "y": pos.y + ned_dy},
-                        "horizontal_err": horizontal_err,
-                        "centered": last_centered,
-                        "ts": time.time(),
-                    })
+                    c._viz.publish(
+                        {
+                            "type": "marker",
+                            "marker_ned": {"x": pos.x + ned_dx, "y": pos.y + ned_dy},
+                            "horizontal_err": horizontal_err,
+                            "centered": last_centered,
+                            "ts": time.time(),
+                        }
+                    )
             else:
                 if reached_floor:
                     logger.warning(
@@ -157,12 +161,9 @@ class PrecisionLand:
                         f"Marker lost for {marker_lost_timeout_s}s above floor "
                         f"(altitude {altitude:.2f} m) — fallback to AUTO_LAND"
                     )
-                    landed = await c.land(
-                        timeout_s=max(10.0, timeout_s - (time.time() - start))
-                    )
+                    landed = await c.land(timeout_s=max(10.0, timeout_s - (time.time() - start)))
                     status = (
-                        PrecisionLandStatus.LANDED if landed
-                        else PrecisionLandStatus.MARKER_LOST
+                        PrecisionLandStatus.LANDED if landed else PrecisionLandStatus.MARKER_LOST
                     )
                     return PrecisionLandResult(
                         status=status,

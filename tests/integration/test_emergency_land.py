@@ -1,5 +1,5 @@
 """Integration tests for emergency_land() chain semantics."""
-import asyncio
+
 from unittest.mock import patch
 
 import pytest
@@ -42,6 +42,7 @@ async def test_emergency_land_sends_termination_on_land_timeout():
         def __getattr__(self, _name):
             def _no(*_a, **_kw):
                 return None
+
             return _no
 
     class _FakeMav:
@@ -64,11 +65,12 @@ async def test_emergency_land_sends_termination_on_land_timeout():
         await d.emergency_land()
 
     from pymavlink import mavutil
-    assert mavutil.mavlink.MAV_CMD_NAV_LAND in sent_commands, (
-        f"expected NAV_LAND command in sent={sent_commands}"
-    )
-    assert mavutil.mavlink.MAV_CMD_DO_FLIGHTTERMINATION in sent_commands, (
-        f"expected FLIGHTTERMINATION in sent={sent_commands}"
-    )
+
+    assert (
+        mavutil.mavlink.MAV_CMD_NAV_LAND in sent_commands
+    ), f"expected NAV_LAND command in sent={sent_commands}"
+    assert (
+        mavutil.mavlink.MAV_CMD_DO_FLIGHTTERMINATION in sent_commands
+    ), f"expected FLIGHTTERMINATION in sent={sent_commands}"
 
     d.close()

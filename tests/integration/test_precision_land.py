@@ -3,7 +3,6 @@
 Verifies the four non-trivial PrecisionLandStatus outcomes by feeding a
 simulated marker callback under different conditions.
 """
-import asyncio
 
 import pytest
 
@@ -38,6 +37,7 @@ async def test_precision_land_returns_result_object():
     """Result type must be PrecisionLandResult, not bool."""
     d = await _prepare_offboard_drone()
     try:
+
         def marker():
             return MarkerObservation(dx=0.0, dy=0.0)
 

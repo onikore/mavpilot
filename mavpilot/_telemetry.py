@@ -5,19 +5,25 @@ The receiver thread (in MAVLinkConnection) calls ``handle_message`` for every
 frame. COMMAND_ACK frames are forwarded to ``route_ack`` (wired by the
 controller to the command sender). STATUSTEXT frames are mirrored to ``viz``.
 """
+
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import threading
 import time
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from pymavlink import mavutil
 
 from .constants import ACK_RESULT_NAMES, PX4_CUSTOM_MAIN_MODE_OFFBOARD
 from .types import Position
 from .utils import normalize_yaw_deg
+
+if TYPE_CHECKING:
+    from .viz import VizServer
 
 logger = logging.getLogger("drone")
 
@@ -48,7 +54,7 @@ class Telemetry:
             "last_ack": None,
         }
         # Wired by the controller after construction.
-        self.viz = None
+        self.viz: VizServer | None = None
         self.route_ack: Callable[[int, int], None] = lambda command, result: None
 
     @property
@@ -57,11 +63,10 @@ class Telemetry:
 
     def handle_message(self, msg) -> None:
         t = msg.get_type()
-        try:
+        # Some synthetic test messages lack get_srcSystem; treat as matching.
+        with contextlib.suppress(Exception):
             if msg.get_srcSystem() != self.target_system and self.target_system != 0:
                 return
-        except Exception:
-            pass
         now = time.time()
         with self._lock:
             if t == "HEARTBEAT":
@@ -104,12 +109,14 @@ class Telemetry:
                 else:
                     logger.info(f"PX4: {text}")
                 if self.viz is not None:
-                    self.viz.publish({
-                        "type": "log",
-                        "severity": sev,
-                        "text": text,
-                        "ts": now,
-                    })
+                    self.viz.publish(
+                        {
+                            "type": "log",
+                            "severity": sev,
+                            "text": text,
+                            "ts": now,
+                        }
+                    )
             elif t == "COMMAND_ACK":
                 r = ACK_RESULT_NAMES.get(msg.result, str(msg.result))
                 self._tel["last_ack"] = (msg.command, msg.result)
@@ -125,26 +132,26 @@ class Telemetry:
 
     def get_yaw_rad(self) -> float:
         with self._lock:
-            return self._tel["yaw"]
+            return float(self._tel["yaw"])
 
     def get_yaw_deg(self) -> float:
         return normalize_yaw_deg(math.degrees(self.get_yaw_rad()))
 
     def is_armed(self) -> bool:
         with self._lock:
-            return self._tel["armed"]
+            return bool(self._tel["armed"])
 
     def get_main_mode(self) -> int:
         with self._lock:
-            return self._tel["main_mode"]
+            return int(self._tel["main_mode"])
 
     def get_sub_mode(self) -> int:
         with self._lock:
-            return self._tel["sub_mode"]
+            return int(self._tel["sub_mode"])
 
     def is_offboard(self) -> bool:
         return self.get_main_mode() == PX4_CUSTOM_MAIN_MODE_OFFBOARD
 
     def landed_state(self) -> int:
         with self._lock:
-            return self._tel["landed_state"]
+            return int(self._tel["landed_state"])

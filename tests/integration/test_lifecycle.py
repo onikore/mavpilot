@@ -1,4 +1,5 @@
 """async with DroneController(...) lifecycle tests."""
+
 import pytest
 
 from mavpilot import DroneController

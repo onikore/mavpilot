@@ -8,13 +8,13 @@ Keeping a facade reference makes the inter-method calls (e.g. takeoff → arm,
 goto → set_yaw) read naturally while the heavy lifting lives in the
 specialised collaborators.
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
 import math
 import time
-from typing import Optional
 
 from pymavlink import mavutil
 
@@ -36,9 +36,7 @@ class MissionOps:
 
     def check_watchdog(self) -> None:
         if self._ctx._watchdog_tripped:
-            raise DroneError(
-                "telemetry lost: streamer watchdog tripped — call emergency_land()"
-            )
+            raise DroneError("telemetry lost: streamer watchdog tripped — call emergency_land()")
 
     async def arm(self, timeout_s: float = 10.0) -> bool:
         c = self._ctx
@@ -47,7 +45,7 @@ class MissionOps:
             return True
         c._viz_publish_command("arm")
         logger.info("Arming...")
-        return await c._send_arm(arm=True, timeout_s=timeout_s)
+        return await c._send_arm(arm=True, timeout_s=timeout_s)  # type: ignore[no-any-return]
 
     async def disarm(self, force: bool = False, timeout_s: float = 5.0) -> bool:
         c = self._ctx
@@ -56,7 +54,9 @@ class MissionOps:
             return True
         c._viz_publish_command("disarm", force=force)
         logger.info(f"Disarming{' (FORCED)' if force else ''}...")
-        return await c._send_arm(arm=False, force=force, timeout_s=timeout_s)
+        return await c._send_arm(  # type: ignore[no-any-return]
+            arm=False, force=force, timeout_s=timeout_s
+        )
 
     async def takeoff(self, altitude_m: float, timeout_s: float = 30.0) -> bool:
         """Arm the vehicle, enter OFFBOARD mode, and climb to altitude_m.
@@ -85,9 +85,8 @@ class MissionOps:
         await asyncio.sleep(1.5)  # let PX4 see ~75 setpoints before any state change
 
         # 2. Arm first — must precede OFFBOARD on PX4 ≥1.13.
-        if not c.is_armed():
-            if not await self.arm():
-                raise DroneError("Arm failed")
+        if not c.is_armed() and not await self.arm():
+            raise DroneError("Arm failed")
 
         # 3. Enter OFFBOARD now that we're armed and streaming.
         if not await c._set_mode(PX4_CUSTOM_MAIN_MODE_OFFBOARD):
@@ -99,7 +98,9 @@ class MissionOps:
         c._set_setpoint_position(pos2.x, pos2.y, target_z, c.get_yaw_rad())
 
         return await self.wait_position_reached(
-            pos2.x, pos2.y, target_z,
+            pos2.x,
+            pos2.y,
+            target_z,
             timeout_s=timeout_s,
             xy_tol=2.0,
             z_tol=0.5,
@@ -110,7 +111,7 @@ class MissionOps:
         x: float,
         y: float,
         z: float,
-        yaw_deg: Optional[float] = None,
+        yaw_deg: float | None = None,
         timeout_s: float = 30.0,
         hover_time_s: float = 2.0,
         xy_tol_m: float = 0.5,
@@ -147,7 +148,7 @@ class MissionOps:
             dy = y - from_pos.y
             dist_xy = math.hypot(dx, dy)
             if dist_xy > 0.05:
-                heading = math.atan2(dy, dx)
+                heading: float | None = math.atan2(dy, dx)
                 try:
                     c._ensure_streamer_started()
                 except DroneError:
@@ -156,8 +157,16 @@ class MissionOps:
 
                 if heading is not None:
                     current_yaw = c.get_yaw_rad()
-                    yaw_err = math.degrees(abs(math.atan2(math.sin(heading - current_yaw), math.cos(heading - current_yaw))))
-                    deg_per_sec = math.degrees(c.yaw_slew_rate_rad) if c.yaw_slew_rate_rad > 0 else 30.0
+                    yaw_err = math.degrees(
+                        abs(
+                            math.atan2(
+                                math.sin(heading - current_yaw), math.cos(heading - current_yaw)
+                            )
+                        )
+                    )
+                    deg_per_sec = (
+                        math.degrees(c.yaw_slew_rate_rad) if c.yaw_slew_rate_rad > 0 else 30.0
+                    )
                     yaw_timeout = min(60.0, max(2.0, yaw_err / max(1e-3, deg_per_sec) + 2.0))
                     ok = await self.set_yaw(math.degrees(heading), timeout_s=yaw_timeout)
                     if not ok:
@@ -165,8 +174,8 @@ class MissionOps:
 
         try:
             c._ensure_streamer_started()
-        except DroneError:
-            raise DroneError("Cannot start offboard streamer before goto()")
+        except DroneError as e:
+            raise DroneError("Cannot start offboard streamer before goto()") from e
 
         c._set_setpoint_position(x, y, z, yaw_rad)
 
@@ -179,20 +188,32 @@ class MissionOps:
 
         return reached
 
-    async def goto_relative(self, dx: float, dy: float, dz: float, yaw_deg: Optional[float] = None, **kwargs) -> bool:
+    async def goto_relative(
+        self, dx: float, dy: float, dz: float, yaw_deg: float | None = None, **kwargs
+    ) -> bool:
         """Fly to a position offset from the current NED position."""
         pos = self._ctx.get_local_position()
         return await self.goto(pos.x + dx, pos.y + dy, pos.z + dz, yaw_deg=yaw_deg, **kwargs)
 
-    async def goto_body_relative(self, forward_m: float, right_m: float, down_m: float, yaw_deg: Optional[float] = None, **kwargs) -> bool:
+    async def goto_body_relative(
+        self,
+        forward_m: float,
+        right_m: float,
+        down_m: float,
+        yaw_deg: float | None = None,
+        **kwargs,
+    ) -> bool:
         """Fly to a position offset in body FRD frame (no heading math required)."""
         c = self._ctx
         pos = c.get_local_position()
         yaw = c.get_yaw_rad()
         ned_dx, ned_dy = body_to_ned(forward_m, right_m, yaw)
         return await self.goto(
-            pos.x + ned_dx, pos.y + ned_dy, pos.z + down_m,
-            yaw_deg=yaw_deg, **kwargs,
+            pos.x + ned_dx,
+            pos.y + ned_dy,
+            pos.z + down_m,
+            yaw_deg=yaw_deg,
+            **kwargs,
         )
 
     async def hover(self, duration_s: float):
@@ -216,9 +237,7 @@ class MissionOps:
         while time.time() - start < timeout_s:
             await asyncio.sleep(0.1)
             current = c.get_yaw_rad()
-            err = math.atan2(
-                math.sin(target_yaw_rad - current), math.cos(target_yaw_rad - current)
-            )
+            err = math.atan2(math.sin(target_yaw_rad - current), math.cos(target_yaw_rad - current))
             if abs(err) < math.radians(5.0):
                 logger.info(f"Yaw reached (err {math.degrees(err):.1f}°)")
                 return True
@@ -237,7 +256,8 @@ class MissionOps:
         )
 
         if not await c._set_mode(
-            PX4_CUSTOM_MAIN_MODE_AUTO, PX4_CUSTOM_SUB_MODE_AUTO_LAND,
+            PX4_CUSTOM_MAIN_MODE_AUTO,
+            PX4_CUSTOM_SUB_MODE_AUTO_LAND,
         ):
             logger.warning("Land mode change rejected — sending MAV_CMD_NAV_LAND directly")
             self._raw_command_long(mavutil.mavlink.MAV_CMD_NAV_LAND, 0, 0, 0, 0, 0, 0, 0)
@@ -268,7 +288,8 @@ class MissionOps:
             target={"x": 0.0, "y": 0.0, "z": 0.0},
         )
         if not await c._set_mode(
-            PX4_CUSTOM_MAIN_MODE_AUTO, PX4_CUSTOM_SUB_MODE_AUTO_RTL,
+            PX4_CUSTOM_MAIN_MODE_AUTO,
+            PX4_CUSTOM_SUB_MODE_AUTO_RTL,
         ):
             return False
 
@@ -334,7 +355,9 @@ class MissionOps:
         if not c._mock and c._connection is not None and c._connection.mav is not None:
             logger.error("Land and NAV_LAND both timed out — sending DO_FLIGHTTERMINATION")
             try:
-                self._raw_command_long(mavutil.mavlink.MAV_CMD_DO_FLIGHTTERMINATION, 1, 0, 0, 0, 0, 0, 0)
+                self._raw_command_long(
+                    mavutil.mavlink.MAV_CMD_DO_FLIGHTTERMINATION, 1, 0, 0, 0, 0, 0, 0
+                )
             except Exception as e:
                 logger.error(f"DO_FLIGHTTERMINATION send failed: {e}")
 
@@ -345,13 +368,22 @@ class MissionOps:
             return
         c._connection.send(
             "command_long_send",
-            c.target_system, c.target_component,
+            c.target_system,
+            c.target_component,
             cmd_id,
             0,
             *params,
         )
 
-    async def wait_position_reached(self, x: float, y: float, z: float, timeout_s: float, xy_tol: float = 0.5, z_tol: float = 0.5) -> bool:
+    async def wait_position_reached(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        timeout_s: float,
+        xy_tol: float = 0.5,
+        z_tol: float = 0.5,
+    ) -> bool:
         c = self._ctx
         start = time.time()
         while time.time() - start < timeout_s:
@@ -368,6 +400,7 @@ class MissionOps:
                 return True
         pos = c.get_local_position()
         logger.warning(
-            f"Position timeout: target=({x:.2f},{y:.2f},{z:.2f}) current=({pos.x:.2f},{pos.y:.2f},{pos.z:.2f})"
+            f"Position timeout: target=({x:.2f},{y:.2f},{z:.2f}) "
+            f"current=({pos.x:.2f},{pos.y:.2f},{pos.z:.2f})"
         )
         return False

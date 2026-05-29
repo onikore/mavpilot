@@ -1,4 +1,5 @@
 """mavpilot — async PX4 drone controller via MAVLink."""
+
 __all__ = [
     "DroneController",
     "DroneError",

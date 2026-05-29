@@ -1,4 +1,5 @@
 """Integration tests for return_to_launch correctness."""
+
 import asyncio
 
 import pytest
@@ -51,6 +52,7 @@ async def test_rtl_reports_complete_when_landed_and_disarmed():
     d = DroneController(mock=True, enable_viz=False)
     await d.connect()
     try:
+
         async def land_and_disarm():
             await asyncio.sleep(0.5)
             with d._tel_lock:

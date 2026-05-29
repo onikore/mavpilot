@@ -5,6 +5,7 @@ The mission loop must trigger emergency_land on:
   * KeyboardInterrupt (Ctrl-C — was broken in v0.1.0)
   * Receiving SIGINT/SIGTERM during a long-running await
 """
+
 import asyncio
 
 import pytest
@@ -12,6 +13,7 @@ import pytest
 
 class _RecordingDrone:
     """Stand-in for DroneController used to verify the CLI's shutdown path."""
+
     def __init__(self) -> None:
         self.emergency_land_called = False
         self.close_called = False
@@ -44,6 +46,7 @@ class _RecordingDrone:
 
     def get_local_position(self):
         from mavpilot.types import Position
+
         return Position(0.0, 0.0, 0.0)
 
 

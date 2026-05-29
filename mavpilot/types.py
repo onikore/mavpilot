@@ -1,7 +1,7 @@
 """Small data classes used across the package."""
+
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
 
 
 @dataclass
@@ -35,7 +35,7 @@ class MarkerObservation:
 
     dx: float
     dy: float
-    dz: Optional[float] = None
+    dz: float | None = None
 
 
 class PrecisionLandStatus(Enum):

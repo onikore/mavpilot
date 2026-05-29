@@ -4,19 +4,21 @@ Async wrapper around pymavlink. Background threads handle the heartbeat,
 incoming MAVLink messages, and offboard setpoint streaming. The asyncio
 event loop runs user mission code on top.
 """
+
 import asyncio
+import contextlib
 import logging
 import math
 import threading
 import time
-from typing import Optional
+from typing import TYPE_CHECKING
 
 from pymavlink import mavutil
 
 from ._commands import CommandSender
 from ._connection import MAVLinkConnection
-from ._mock import MockMavConnection, MockSimulator
 from ._mission import MissionOps
+from ._mock import MockMavConnection, MockSimulator
 from ._precision_land import PrecisionLand
 from ._safety import SafetyOps
 from ._streamer import OffboardStreamer
@@ -24,6 +26,9 @@ from ._telemetry import Telemetry
 from .errors import DroneError
 from .types import Position
 from .viz import VizServer
+
+if TYPE_CHECKING:
+    from .types import PrecisionLandResult
 
 logger = logging.getLogger("drone")
 
@@ -94,13 +99,13 @@ class DroneController:
         # going silent. Used to exercise the telemetry watchdog in tests.
         self._mock_sim_paused = False
 
-        self._viz: Optional[VizServer] = (
+        self._viz: VizServer | None = (
             VizServer(port=viz_port, host=viz_host) if enable_viz else None
         )
         # Wire telemetry's outbound hooks now that viz exists.
         self._telemetry.viz = self._viz
         self._telemetry.route_ack = self._commands.route_command_ack
-        self._viz_publisher_task_handle: Optional[asyncio.Task] = None
+        self._viz_publisher_task_handle: asyncio.Task | None = None
 
         self._shutdown_requested = False
         self.yaw_slew_rate_rad = math.radians(yaw_slew_rate_deg)
@@ -223,6 +228,7 @@ class DroneController:
                     logger.warning(f"Viz server failed to start: {e}")
                     self._viz = None
                     self._telemetry.viz = None
+            assert self._mock_sim is not None  # mock mode always has a simulator
             self._mock_sim.start()
             return
 
@@ -242,9 +248,7 @@ class DroneController:
         if self._viz is not None:
             try:
                 self._viz.start()
-                self._viz_publisher_task_handle = asyncio.create_task(
-                    self._viz_publisher_loop()
-                )
+                self._viz_publisher_task_handle = asyncio.create_task(self._viz_publisher_loop())
             except OSError as e:
                 logger.warning(f"Viz server failed to start (port busy?): {e}")
                 self._viz = None
@@ -272,10 +276,8 @@ class DroneController:
         self._shutdown_requested = True
         if self._viz_publisher_task_handle is not None:
             self._viz_publisher_task_handle.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._viz_publisher_task_handle
-            except (asyncio.CancelledError, Exception):
-                pass
             self._viz_publisher_task_handle = None
         self.close()
 
@@ -344,7 +346,7 @@ class DroneController:
     def landed_state(self) -> int:
         return self._telemetry.landed_state()
 
-    def _set_setpoint_position(self, x, y, z, yaw_rad: Optional[float] = None):
+    def _set_setpoint_position(self, x, y, z, yaw_rad: float | None = None):
         self._streamer.set_position(x, y, z, yaw_rad)
 
     def _ensure_streamer_started(self):
@@ -385,13 +387,24 @@ class DroneController:
         """Fly to an absolute NED position. Requires OFFBOARD + armed."""
         return await self._mission.goto(*args, **kwargs)
 
-    async def goto_relative(self, dx: float, dy: float, dz: float, yaw_deg: Optional[float] = None, **kwargs) -> bool:
+    async def goto_relative(
+        self, dx: float, dy: float, dz: float, yaw_deg: float | None = None, **kwargs
+    ) -> bool:
         """Fly to a position offset from the current NED position."""
         return await self._mission.goto_relative(dx, dy, dz, yaw_deg=yaw_deg, **kwargs)
 
-    async def goto_body_relative(self, forward_m: float, right_m: float, down_m: float, yaw_deg: Optional[float] = None, **kwargs) -> bool:
+    async def goto_body_relative(
+        self,
+        forward_m: float,
+        right_m: float,
+        down_m: float,
+        yaw_deg: float | None = None,
+        **kwargs,
+    ) -> bool:
         """Fly to a position offset in body FRD frame (no heading math required)."""
-        return await self._mission.goto_body_relative(forward_m, right_m, down_m, yaw_deg=yaw_deg, **kwargs)
+        return await self._mission.goto_body_relative(
+            forward_m, right_m, down_m, yaw_deg=yaw_deg, **kwargs
+        )
 
     async def hover(self, duration_s: float):
         """Hold current position for duration_s seconds."""
@@ -437,34 +450,44 @@ class DroneController:
                         t = dict(self._tel)
                     with self._setpoint_lock:
                         sp = dict(self._setpoint)
-                    self._viz.publish({
-                        "type": "telemetry",
-                        "x": t["local_x"],
-                        "y": t["local_y"],
-                        "z": t["local_z"],
-                        "vx": t["vx"],
-                        "vy": t["vy"],
-                        "vz": t["vz"],
-                        "yaw": t["yaw"],
-                        "roll": t["roll"],
-                        "pitch": t["pitch"],
-                        "armed": t["armed"],
-                        "main_mode": t["main_mode"],
-                        "sub_mode": t["sub_mode"],
-                        "battery": t["battery_remaining"],
-                        "landed": t["landed_state"],
-                        "streaming": self._streaming,
-                        "setpoint": {
-                            "x": sp["x"], "y": sp["y"], "z": sp["z"],
-                            "yaw": (
-                                None if math.isnan(sp["yaw"]) else sp["yaw"]
-                            ),
-                        },
-                        "ts": time.time(),
-                    })
+                    self._viz.publish(
+                        {
+                            "type": "telemetry",
+                            "x": t["local_x"],
+                            "y": t["local_y"],
+                            "z": t["local_z"],
+                            "vx": t["vx"],
+                            "vy": t["vy"],
+                            "vz": t["vz"],
+                            "yaw": t["yaw"],
+                            "roll": t["roll"],
+                            "pitch": t["pitch"],
+                            "armed": t["armed"],
+                            "main_mode": t["main_mode"],
+                            "sub_mode": t["sub_mode"],
+                            "battery": t["battery_remaining"],
+                            "landed": t["landed_state"],
+                            "streaming": self._streaming,
+                            "setpoint": {
+                                "x": sp["x"],
+                                "y": sp["y"],
+                                "z": sp["z"],
+                                "yaw": (None if math.isnan(sp["yaw"]) else sp["yaw"]),
+                            },
+                            "ts": time.time(),
+                        }
+                    )
                 await asyncio.sleep(0.1)
         except asyncio.CancelledError:
             pass
 
-    async def _wait_position_reached(self, x: float, y: float, z: float, timeout_s: float, xy_tol: float = 0.5, z_tol: float = 0.5) -> bool:
+    async def _wait_position_reached(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        timeout_s: float,
+        xy_tol: float = 0.5,
+        z_tol: float = 0.5,
+    ) -> bool:
         return await self._mission.wait_position_reached(x, y, z, timeout_s, xy_tol, z_tol)

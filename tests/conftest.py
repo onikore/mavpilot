@@ -1,9 +1,10 @@
 """Shared pytest fixtures for mavpilot tests."""
+
 from __future__ import annotations
 
 import threading
 from collections import deque
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 
@@ -33,13 +34,13 @@ class FakeMavConnection:
         with self._lock:
             self._incoming.append(msg)
 
-    def recv_match(self, blocking: bool = True, timeout: float = 0.05, **_: Any) -> Optional[Any]:
+    def recv_match(self, blocking: bool = True, timeout: float = 0.05, **_: Any) -> Any | None:
         with self._lock:
             if self._incoming:
                 return self._incoming.popleft()
         return None
 
-    def wait_heartbeat(self, timeout: float = 5.0) -> Optional[Any]:
+    def wait_heartbeat(self, timeout: float = 5.0) -> Any | None:
         return _FakeHeartbeat(srcSystem=self.target_system, autopilot=12)
 
     def close(self) -> None:
@@ -56,11 +57,13 @@ class _FakeMavBuilder:
     def __getattr__(self, name: str):
         def _record(*args, **kwargs):
             self._parent.sent.append((name, args, kwargs))
+
         return _record
 
 
 class _FakeHeartbeat:
     """Minimal HEARTBEAT stand-in returned by FakeMavConnection.wait_heartbeat."""
+
     def __init__(self, srcSystem: int, autopilot: int) -> None:
         self._sys = srcSystem
         self.autopilot = autopilot
@@ -90,6 +93,7 @@ async def mock_drone():
     aclose() does not exist until Phase 3; before that, falls back to close().
     """
     from mavpilot.controller import DroneController
+
     d = DroneController(mock=True, enable_viz=False)
     await d.connect()
     try:

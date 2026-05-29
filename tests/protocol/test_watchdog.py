@@ -1,4 +1,5 @@
 """Telemetry watchdog: trip flag after silence; next mission method raises."""
+
 import asyncio
 
 import pytest

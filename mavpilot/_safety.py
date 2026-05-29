@@ -4,6 +4,7 @@ wait_until_ready blocks until the EKF reports a fresh LOCAL_POSITION_NED AND
 AHRS health. Reads telemetry through the controller facade (``ctx``);
 apply_safe_params lives in CommandSender and is exposed by the controller.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -39,6 +40,4 @@ class SafetyOps:
                 logger.info("EKF ready")
                 return
             await asyncio.sleep(0.5)
-        raise DroneError(
-            f"EKF readiness timeout (pos_ok={pos_ok}, ekf_healthy={ekf_ok})"
-        )
+        raise DroneError(f"EKF readiness timeout (pos_ok={pos_ok}, ekf_healthy={ekf_ok})")

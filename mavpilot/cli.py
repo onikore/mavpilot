@@ -1,12 +1,14 @@
 """Command-line entrypoint and demo helper callbacks."""
+
 from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import math
 import signal
-from typing import Awaitable, Callable, Optional
+from collections.abc import Awaitable, Callable
 
 from pymavlink import mavutil
 
@@ -21,7 +23,7 @@ def make_simulated_marker(drone: DroneController, marker_ned: tuple[float, float
     """Return a callback that simulates a marker at a fixed NED position."""
     mx, my = marker_ned
 
-    def callback() -> Optional[MarkerObservation]:
+    def callback() -> MarkerObservation | None:
         pos = drone.get_local_position()
         yaw = drone.get_yaw_rad()
         ned_dx = mx - pos.x
@@ -71,28 +73,34 @@ def _build_argparser() -> argparse.ArgumentParser:
         description="mavpilot — PX4 autonomous drone controller with browser visualization."
     )
     parser.add_argument(
-        "--connection", default="udp:127.0.0.1:14540",
+        "--connection",
+        default="udp:127.0.0.1:14540",
         help="MAVLink endpoint (default: udp:127.0.0.1:14540 for SITL)",
     )
     parser.add_argument(
-        "--mock", action="store_true",
+        "--mock",
+        action="store_true",
         help="Mock mode: no MAVLink connection, uses built-in physics simulator.",
     )
     parser.add_argument("--viz-port", type=int, default=8765)
     parser.add_argument("--no-viz", action="store_true", help="Disable browser visualization")
     parser.add_argument(
-        "--viz-host", default="127.0.0.1",
+        "--viz-host",
+        default="127.0.0.1",
         help=(
             "Interface VizServer binds to (default: 127.0.0.1 — localhost-only). "
             "Use 0.0.0.0 to expose on LAN (telemetry will be visible to anyone on the network)."
         ),
     )
     parser.add_argument(
-        "--precision-land", action="store_true",
+        "--precision-land",
+        action="store_true",
         help="Use precision landing with simulated marker instead of regular land.",
     )
     parser.add_argument(
-        "--pattern", choices=["square", "star"], default="square",
+        "--pattern",
+        choices=["square", "star"],
+        default="square",
         help="Demo flight pattern: square or star (default: square)",
     )
     return parser
@@ -104,9 +112,7 @@ async def _demo_mission(drone: DroneController, args) -> None:
     await drone.apply_safe_params()
     await drone.wait_until_ready(timeout_s=60.0)
 
-    logger.info(
-        f"Open http://{args.viz_host}:{args.viz_port} in browser to see trajectory"
-    )
+    logger.info(f"Open http://{args.viz_host}:{args.viz_port} in browser to see trajectory")
     await asyncio.sleep(2.0)
 
     await drone.takeoff(altitude_m=2.0, timeout_s=30.0)
@@ -160,12 +166,11 @@ def _install_signal_handlers(loop: asyncio.AbstractEventLoop, drone: DroneContro
 
     def _scheduler(signame: str) -> Callable[..., None]:
         def _h(*_: object) -> None:
-            try:
+            with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(
                     lambda: asyncio.ensure_future(handle_shutdown_signal(drone, reason=signame))
                 )
-            except RuntimeError:
-                pass
+
         return _h
 
     signal.signal(signal.SIGINT, _scheduler("SIGINT"))
@@ -197,9 +202,7 @@ async def main() -> None:
 
 def main_sync() -> None:
     """Synchronous wrapper for use as a console_scripts entry point."""
-    try:
+    # run_mission already caught and called emergency_land; this just
+    # suppresses the noisy traceback on the way out.
+    with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(main())
-    except KeyboardInterrupt:
-        # run_mission already caught and called emergency_land; this just
-        # suppresses the noisy traceback on the way out.
-        pass
