@@ -34,6 +34,7 @@ class Telemetry:
         self._lock = threading.Lock()
         self._tel: dict = {
             "armed": False,
+            "ever_armed": False,
             "custom_mode": 0,
             "main_mode": 0,
             "sub_mode": 0,
@@ -56,6 +57,7 @@ class Telemetry:
         # Wired by the controller after construction.
         self.viz: VizServer | None = None
         self.route_ack: Callable[[int, int], None] = lambda command, result: None
+        self.route_param: Callable[[object, float], None] = lambda param_id, value: None
 
     @property
     def target_system(self) -> int:
@@ -73,6 +75,8 @@ class Telemetry:
                 self._tel["armed"] = bool(
                     msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
                 )
+                if self._tel["armed"]:
+                    self._tel["ever_armed"] = True
                 cm = msg.custom_mode
                 self._tel["custom_mode"] = cm
                 self._tel["main_mode"] = (cm >> 16) & 0xFF
@@ -123,6 +127,9 @@ class Telemetry:
                 level = logging.INFO if msg.result == 0 else logging.WARNING
                 logger.log(level, f"ACK cmd={msg.command} result={r}")
                 self.route_ack(msg.command, msg.result)
+            elif t == "PARAM_VALUE":
+                # Forwarded to CommandSender for set_param_checked read-back.
+                self.route_param(msg.param_id, msg.param_value)
 
     # ---- typed getters ----------------------------------------------------
 
@@ -140,6 +147,15 @@ class Telemetry:
     def is_armed(self) -> bool:
         with self._lock:
             return bool(self._tel["armed"])
+
+    def ever_armed(self) -> bool:
+        """Whether the vehicle has been armed at any point this session.
+
+        Sticky — stays True after disarm or telemetry loss. Used by the safety
+        path so a frozen-telemetry ``is_armed()==False`` doesn't skip landing.
+        """
+        with self._lock:
+            return bool(self._tel["ever_armed"])
 
     def get_main_mode(self) -> int:
         with self._lock:

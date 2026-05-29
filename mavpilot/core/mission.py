@@ -37,6 +37,8 @@ class MissionOps:
     def check_watchdog(self) -> None:
         if self._ctx._watchdog_tripped:
             raise DroneError("telemetry lost: streamer watchdog tripped — call emergency_land()")
+        if self._ctx._send_fault_tripped:
+            raise DroneError("outbound link down: setpoint send fault — call emergency_land()")
 
     async def arm(self, timeout_s: float = 10.0) -> bool:
         c = self._ctx

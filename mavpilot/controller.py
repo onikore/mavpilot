@@ -144,6 +144,7 @@ class DroneController:
         # Wire telemetry's outbound hooks now that viz exists.
         self._telemetry.viz = self._viz
         self._telemetry.route_ack = self._commands.route_command_ack
+        self._telemetry.route_param = self._commands.route_param_value
         self._viz_publisher_task_handle: asyncio.Task | None = None
 
         self._shutdown_requested = False
@@ -217,6 +218,14 @@ class DroneController:
     @_watchdog_tripped.setter
     def _watchdog_tripped(self, value: bool) -> None:
         self._streamer.watchdog_tripped = value
+
+    @property
+    def _send_fault_tripped(self) -> bool:
+        return self._streamer.send_fault_tripped
+
+    @_send_fault_tripped.setter
+    def _send_fault_tripped(self, value: bool) -> None:
+        self._streamer.send_fault_tripped = value
 
     @property
     def _mav_lock(self) -> threading.Lock:
@@ -346,9 +355,11 @@ class DroneController:
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
-        # If we exit via an exception while still armed mid-air, attempt an
-        # emergency land before tearing down the connection.
-        if exc is not None and self.is_armed():
+        # If we exit via an exception and the vehicle is (or was ever) armed,
+        # attempt an emergency land before tearing down. Using ever_armed as
+        # well as is_armed means frozen/stale telemetry reporting armed=False
+        # can't silently skip the safety path.
+        if exc is not None and (self.is_armed() or self.ever_armed()):
             try:
                 await self.emergency_land()
             except Exception as e:
@@ -422,6 +433,11 @@ class DroneController:
     def is_armed(self) -> bool:
         """Return ``True`` if the vehicle is currently armed."""
         return self._telemetry.is_armed()
+
+    def ever_armed(self) -> bool:
+        """Return ``True`` if the vehicle has been armed at any point this
+        session (sticky; survives disarm and telemetry loss)."""
+        return self._telemetry.ever_armed()
 
     def get_main_mode(self) -> int:
         """Return the PX4 custom *main* mode id from the latest heartbeat."""
