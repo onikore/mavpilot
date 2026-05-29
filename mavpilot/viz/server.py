@@ -1,4 +1,4 @@
-"""Visualization server: HTTP + SSE, serves the bundled single-page 3D UI."""
+"""Visualization server: HTTP + SSE, serves the bundled 3D UI (ES modules)."""
 import json
 import logging
 import queue
@@ -9,11 +9,22 @@ from typing import Optional
 
 logger = logging.getLogger("drone")
 
+# Static UI files served from mavpilot/viz/static/, loaded via
+# importlib.resources so it works inside zipped wheels / PyInstaller.
+_STATIC_FILES = {
+    "/": ("index.html", "text/html; charset=utf-8"),
+    "/index.html": ("index.html", "text/html; charset=utf-8"),
+    "/main.js": ("main.js", "application/javascript; charset=utf-8"),
+    "/sse.js": ("sse.js", "application/javascript; charset=utf-8"),
+    "/scene.js": ("scene.js", "application/javascript; charset=utf-8"),
+    "/telemetry.js": ("telemetry.js", "application/javascript; charset=utf-8"),
+    "/log.js": ("log.js", "application/javascript; charset=utf-8"),
+    "/styles.css": ("styles.css", "text/css; charset=utf-8"),
+}
 
-def _load_viz_html() -> bytes:
-    """Read the bundled _viz.html via importlib.resources so it works in
-    zipped wheels / PyInstaller installs where os.path.dirname is fragile."""
-    return (resources.files("mavpilot") / "_viz.html").read_bytes()
+
+def _load_static(filename: str) -> bytes:
+    return (resources.files("mavpilot.viz") / "static" / filename).read_bytes()
 
 
 def _sanitize_for_json(obj):
@@ -42,9 +53,10 @@ class VizServer:
     Open http://localhost:<port> while the drone is running.
     """
 
-    def __init__(self, port: int = 8765, host: str = "127.0.0.1"):
+    def __init__(self, port: int = 8765, host: str = "127.0.0.1", max_clients: int = 32):
         self.port = port
         self.host = host
+        self.max_clients = max_clients
         self._clients_lock = threading.Lock()
         self._clients: list[queue.Queue] = []
         self._server: Optional[ThreadingHTTPServer] = None
@@ -57,29 +69,42 @@ class VizServer:
             server_version = "mavpilot-viz/1.0"
 
             def do_GET(self):  # noqa: N802
-                if self.path in ("/", "/index.html"):
-                    self._serve_html()
+                if self.path in _STATIC_FILES:
+                    self._serve_static(self.path)
                 elif self.path == "/events":
                     self._serve_sse()
                 else:
                     self.send_response(404)
                     self.end_headers()
 
-            def _serve_html(self):
+            def _serve_static(self, path):
+                filename, content_type = _STATIC_FILES[path]
                 try:
-                    data = _load_viz_html()
+                    data = _load_static(filename)
                 except Exception:
                     self.send_response(500)
                     self.end_headers()
                     return
                 self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(data)))
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(data)
 
             def _serve_sse(self):
+                # Cap concurrent SSE clients to avoid unbounded thread spawn.
+                with viz_ref._clients_lock:
+                    if len(viz_ref._clients) >= viz_ref.max_clients:
+                        self.send_response(503)
+                        self.send_header("Content-Type", "text/plain")
+                        self.end_headers()
+                        try:
+                            self.wfile.write(b"viz client cap reached\n")
+                        except Exception:
+                            pass
+                        return
+
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
@@ -103,6 +128,9 @@ class VizServer:
                             self.wfile.write(b": ping\n\n")
                             self.wfile.flush()
                             continue
+                        if data is None:
+                            # Shutdown sentinel pushed by stop().
+                            break
                         self.wfile.write(b"data: ")
                         self.wfile.write(data.encode("utf-8"))
                         self.wfile.write(b"\n\n")
@@ -130,6 +158,14 @@ class VizServer:
         logger.info(f"Visualization: http://localhost:{self.port}")
 
     def stop(self):
+        # Push a sentinel so SSE workers exit promptly instead of waiting up
+        # to 15 s for their q.get timeout to expire.
+        with self._clients_lock:
+            for q in list(self._clients):
+                try:
+                    q.put_nowait(None)
+                except Exception:
+                    pass
         if self._server is not None:
             try:
                 self._server.shutdown()

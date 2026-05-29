@@ -48,7 +48,8 @@ dev = [
 include = ["mavpilot*"]
 
 [tool.setuptools.package-data]
-mavpilot = ["_viz.html", "py.typed"]
+mavpilot = ["py.typed"]
+"mavpilot.viz" = ["static/*.html", "static/*.js", "static/*.css", "static/*.json"]
 
 [tool.black]
 line-length = 100
