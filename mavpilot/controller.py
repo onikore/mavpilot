@@ -121,6 +121,7 @@ class DroneController:
             "pitch": 0.0,
             "battery_remaining": 1.0,
             "landed_state": 0,
+            "ekf_healthy": True,
             "local_position_ok": False,
             "last_local_pos_ts": 0.0,
             "last_ack": None,
@@ -479,6 +480,10 @@ class DroneController:
             elif t == "BATTERY_STATUS":
                 if msg.battery_remaining >= 0:
                     self._tel["battery_remaining"] = msg.battery_remaining / 100.0
+            elif t == "SYS_STATUS":
+                # Bit MAV_SYS_STATUS_AHRS = 1<<5 = 32. Health bit set if EKF OK.
+                health = getattr(msg, "onboard_control_sensors_health", 0)
+                self._tel["ekf_healthy"] = bool(health & 32)
             elif t == "STATUSTEXT":
                 text = msg.text.rstrip("\0\t ") if isinstance(msg.text, str) else msg.text
                 sev = msg.severity
@@ -603,16 +608,20 @@ class DroneController:
             return
         logger.info("Waiting for EKF (LOCAL_POSITION_NED)...")
         start = time.time()
+        pos_ok = ekf_ok = False
         while time.time() - start < timeout_s:
             with self._tel_lock:
-                ok = self._tel["local_position_ok"] and (
+                pos_ok = self._tel["local_position_ok"] and (
                     time.time() - self._tel["last_local_pos_ts"] < 2.0
                 )
-            if ok:
+                ekf_ok = self._tel["ekf_healthy"]
+            if pos_ok and ekf_ok:
                 logger.info("EKF ready")
                 return
             await asyncio.sleep(0.5)
-        raise DroneError("EKF readiness timeout")
+        raise DroneError(
+            f"EKF readiness timeout (pos_ok={pos_ok}, ekf_healthy={ekf_ok})"
+        )
 
     def get_local_position(self) -> Position:
         with self._tel_lock:
