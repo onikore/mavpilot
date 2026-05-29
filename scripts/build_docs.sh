@@ -12,11 +12,15 @@ OUT="${OUT:-docs/api}"
 
 cd "$(dirname "$0")/.."
 
+# `mavpilot` exposes the public API via __all__ (DroneController + data types),
+# which keeps the internal mavpilot.core.* modules out of the rendered site.
+# mavpilot.utils is public (per the README) but not re-exported, so include it
+# explicitly to give the coordinate helpers their own page.
 echo "Building API docs into ${OUT}/ ..."
 python -m pdoc \
     --docformat google \
     --logo-link "https://github.com/Onikore/mavpilot" \
     -o "${OUT}" \
-    mavpilot
+    mavpilot mavpilot.utils
 
 echo "Done. Open ${OUT}/index.html"
