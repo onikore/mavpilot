@@ -24,6 +24,7 @@ from .constants import (
     PX4_CUSTOM_SUB_MODE_AUTO_RTL,
     PX4_CUSTOM_SUB_MODE_AUTO_TAKEOFF,
 )
+from ._connection import MAVLinkConnection
 from .types import Position, MarkerObservation
 from .utils import int_to_float_bits, body_to_ned
 from .viz import VizServer
@@ -66,9 +67,19 @@ class DroneController:
         self.loop_period = 1.0 / loop_hz
         self._mock = mock
 
-        self.mav: Optional[mavutil.mavfile] = None
-        self.target_system = 0
-        self.target_component = 0
+        # MAVLink I/O is owned by MAVLinkConnection (non-mock). In mock mode
+        # there is no real connection; mav/target_* are served from a tiny
+        # in-process holder so the property shims below keep working.
+        if not mock:
+            self._connection: Optional[MAVLinkConnection] = MAVLinkConnection(
+                connection_string=connection_string,
+                source_system=source_system,
+                source_component=source_component,
+            )
+        else:
+            self._connection = None
+        self._mock_target_system = 0
+        self._mock_target_component = 0
         self._mock_sim_thread: Optional[threading.Thread] = None
 
         self._setpoint_lock = threading.Lock()
@@ -85,15 +96,13 @@ class DroneController:
         }
         self._streaming = False
         self._streamer_thread: Optional[threading.Thread] = None
-        self._heartbeat_thread: Optional[threading.Thread] = None
-        self._receiver_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
         self._tel_lock = threading.Lock()
-        # Single threading.Lock funneling EVERY access to self.mav.mav.*_send
-        # and self.mav.recv_match. In Phase 3 this lock moves into a dedicated
-        # _connection.MAVLinkConnection class; the contract is identical.
-        self._mav_lock = threading.Lock()
+        # The MAVLink I/O lock now lives inside MAVLinkConnection. This
+        # fallback lock is only used in mock mode (no real connection) so the
+        # `with self._mav_lock:` blocks still work; nothing real is guarded.
+        self._mock_mav_lock = threading.Lock()
         # COMMAND_ACK routing: (cmd_id, target_sys, target_comp) -> {future, deadline_monotonic, base_timeout}
         self._pending_acks: dict[tuple[int, int, int], dict] = {}
         self._pending_acks_lock = threading.Lock()
@@ -135,6 +144,55 @@ class DroneController:
         self._shutdown_requested = False
         self.yaw_slew_rate_rad = math.radians(yaw_slew_rate_deg)
 
+    # ---- MAVLink connection shims (Phase 3) -------------------------------
+    # The pymavlink connection, the I/O lock, and target sysid live inside
+    # self._connection (non-mock). These properties keep the historical
+    # attribute surface (self.mav, self._mav_lock, self.target_system, …)
+    # working for call sites and tests during the decomposition.
+
+    @property
+    def _mav_lock(self) -> threading.Lock:
+        if self._connection is None:
+            return self._mock_mav_lock
+        return self._connection._lock
+
+    @property
+    def mav(self):
+        return None if self._connection is None else self._connection.mav
+
+    @mav.setter
+    def mav(self, value):
+        # Used by tests that stub mav directly. Forward to the connection;
+        # in mock mode there is no connection so the value is ignored.
+        if self._connection is not None:
+            self._connection.mav = value
+
+    @property
+    def target_system(self) -> int:
+        if self._connection is None:
+            return self._mock_target_system
+        return self._connection.target_system
+
+    @target_system.setter
+    def target_system(self, v: int) -> None:
+        if self._connection is None:
+            self._mock_target_system = v
+        else:
+            self._connection.target_system = v
+
+    @property
+    def target_component(self) -> int:
+        if self._connection is None:
+            return self._mock_target_component
+        return self._connection.target_component
+
+    @target_component.setter
+    def target_component(self, v: int) -> None:
+        if self._connection is None:
+            self._mock_target_component = v
+        else:
+            self._connection.target_component = v
+
     async def connect(self, timeout_s: float = 30.0, baud: int = 57600):
         self._ack_loop = asyncio.get_running_loop()
         if self._mock:
@@ -157,94 +215,17 @@ class DroneController:
             self._start_mock_sim_thread()
             return
 
-        logger.info(f"Connecting to {self.connection_string}")
-        kwargs = {
-            "source_system": self.source_system,
-            "source_component": self.source_component,
-        }
-        if not (
-            self.connection_string.startswith("udp")
-            or self.connection_string.startswith("tcp")
-        ):
-            kwargs["baud"] = baud
-        self.mav = mavutil.mavlink_connection(self.connection_string, **kwargs)
-        self.mav.mavlink20()
-
-        loop = asyncio.get_running_loop()
-        hb = await asyncio.wait_for(
-            loop.run_in_executor(None, lambda: self.mav.wait_heartbeat(timeout=timeout_s)),
-            timeout=timeout_s + 5,
-        )
-        if hb is None:
-            raise DroneError("No heartbeat received")
-
-        self.target_system = self.mav.target_system
-        self.target_component = self.mav.target_component
-        if self.target_system == 0:
-            try:
-                src_sys = hb.get_srcSystem()
-                src_comp = hb.get_srcComponent()
-            except Exception:
-                src_sys = None
-                src_comp = None
-
-            try:
-                is_ap = getattr(hb, "autopilot", None) is not None and hb.autopilot != mavutil.mavlink.MAV_AUTOPILOT_INVALID
-            except Exception:
-                is_ap = False
-
-            if src_sys and is_ap:
-                self.target_system = src_sys
-                self.target_component = src_comp
-                logger.warning(
-                    "Inferred target from heartbeat: sys=%s comp=%s",
-                    self.target_system,
-                    self.target_component,
-                )
-            else:
-                found = False
-                deadline = time.time() + 5.0
-                while time.time() < deadline:
-                    try:
-                        msg = await loop.run_in_executor(None, lambda: self.mav.recv_match(blocking=True, timeout=1.0))
-                    except Exception:
-                        msg = None
-                    if msg is None:
-                        continue
-                    if msg.get_type() == "HEARTBEAT":
-                        src = msg.get_srcSystem()
-                        comp = msg.get_srcComponent()
-                        try:
-                            ap = getattr(msg, "autopilot", None)
-                        except Exception:
-                            ap = None
-                        if ap is not None and ap != mavutil.mavlink.MAV_AUTOPILOT_INVALID:
-                            self.target_system = src
-                            self.target_component = comp
-                            found = True
-                            logger.warning("Detected autopilot heartbeat from sys=%s comp=%s", src, comp)
-                            break
-                if not found and self.target_system == 0:
-                    if src_sys:
-                        self.target_system = src_sys
-                        self.target_component = src_comp
-                        logger.warning(
-                            "Falling back to initial heartbeat source sys=%s comp=%s",
-                            src_sys,
-                            src_comp,
-                        )
-                    else:
-                        raise DroneError(
-                            "target_system == 0 after heartbeat. Could not determine autopilot sysid. "
-                            "Ensure SITL/autopilot is running and the connection string is correct."
-                        )
+        try:
+            await self._connection.connect(timeout_s=timeout_s, baud=baud)
+        except RuntimeError as e:
+            raise DroneError(str(e)) from e
         logger.info(
             f"Heartbeat from sys={self.target_system} comp={self.target_component} "
             f"src_sys={self.source_system} src_comp={self.source_component}"
         )
 
-        self._start_heartbeat_thread()
-        self._start_receiver_thread()
+        self._connection.start_heartbeat()
+        self._connection.start_receiver(self._handle_message)
         await self._request_data_streams()
 
         if self._viz is not None:
@@ -265,40 +246,13 @@ class DroneController:
             self._viz_publisher_task_handle.cancel()
         if self._viz is not None:
             self._viz.stop()
-        for thr in (
-            self._streamer_thread,
-            self._heartbeat_thread,
-            self._receiver_thread,
-            self._mock_sim_thread,
-        ):
+        for thr in (self._streamer_thread, self._mock_sim_thread):
             if thr is not None and thr.is_alive():
                 thr.join(timeout=2.0)
-        if self.mav is not None:
-            try:
-                self.mav.close()
-            except Exception:
-                pass
-
-    def _start_heartbeat_thread(self):
-        if self._mock:
-            return
-
-        def loop():
-            while not self._stop_event.is_set():
-                try:
-                    with self._mav_lock:
-                        self.mav.mav.heartbeat_send(
-                            mavutil.mavlink.MAV_TYPE_ONBOARD_CONTROLLER,
-                            mavutil.mavlink.MAV_AUTOPILOT_INVALID,
-                            0, 0, 0,
-                        )
-                except Exception as e:
-                    logger.warning(f"heartbeat send error: {e}")
-                if self._stop_event.wait(1.0):
-                    break
-
-        self._heartbeat_thread = threading.Thread(target=loop, daemon=True, name="hb")
-        self._heartbeat_thread.start()
+        # Heartbeat/receiver threads and the pymavlink socket are owned by the
+        # connection (non-mock only).
+        if self._connection is not None:
+            self._connection.close()
 
     def _start_mock_sim_thread(self):
         max_speed_xy = 3.0
@@ -428,22 +382,6 @@ class DroneController:
 
         self._mock_sim_thread = threading.Thread(target=loop, daemon=True, name="mock-sim")
         self._mock_sim_thread.start()
-
-    def _start_receiver_thread(self):
-        def loop():
-            while not self._stop_event.is_set():
-                try:
-                    with self._mav_lock:
-                        msg = self.mav.recv_match(blocking=True, timeout=0.05)
-                    if msg is None:
-                        continue
-                    self._handle_message(msg)
-                except Exception as e:
-                    logger.error(f"receiver error: {e}")
-                    time.sleep(0.1)
-
-        self._receiver_thread = threading.Thread(target=loop, daemon=True, name="recv")
-        self._receiver_thread.start()
 
     def _handle_message(self, msg):
         t = msg.get_type()
