@@ -13,16 +13,9 @@ from typing import Optional
 
 from pymavlink import mavutil
 
-from .constants import (
-    PX4_CUSTOM_MAIN_MODE_AUTO,
-    PX4_CUSTOM_MAIN_MODE_OFFBOARD,
-    PX4_CUSTOM_SUB_MODE_AUTO_LAND,
-    PX4_CUSTOM_SUB_MODE_AUTO_LOITER,
-    PX4_CUSTOM_SUB_MODE_AUTO_RTL,
-    PX4_CUSTOM_SUB_MODE_AUTO_TAKEOFF,
-)
 from ._commands import CommandSender
 from ._connection import MAVLinkConnection
+from ._mock import MockMavConnection, MockSimulator
 from ._mission import MissionOps
 from ._precision_land import PrecisionLand
 from ._safety import SafetyOps
@@ -66,20 +59,18 @@ class DroneController:
         self.loop_period = 1.0 / loop_hz
         self._mock = mock
 
-        # MAVLink I/O is owned by MAVLinkConnection (non-mock). In mock mode
-        # there is no real connection; mav/target_* are served from a tiny
-        # in-process holder so the property shims below keep working.
-        if not mock:
-            self._connection: Optional[MAVLinkConnection] = MAVLinkConnection(
+        # MAVLink I/O is owned by the connection object. Real links use
+        # MAVLinkConnection; mock mode uses MockMavConnection (same interface,
+        # no real I/O) so the rest of the controller is link-agnostic.
+        self._connection = (
+            MAVLinkConnection(
                 connection_string=connection_string,
                 source_system=source_system,
                 source_component=source_component,
             )
-        else:
-            self._connection = None
-        self._mock_target_system = 0
-        self._mock_target_component = 0
-        self._mock_sim_thread: Optional[threading.Thread] = None
+            if not mock
+            else MockMavConnection()
+        )
 
         self._stop_event = threading.Event()
 
@@ -87,10 +78,6 @@ class DroneController:
         # controller keeps self._tel / self._tel_lock property shims (below)
         # for the many call sites that still read them directly.
         self._telemetry = Telemetry(self._connection)
-        # The MAVLink I/O lock now lives inside MAVLinkConnection. This
-        # fallback lock is only used in mock mode (no real connection) so the
-        # `with self._mav_lock:` blocks still work; nothing real is guarded.
-        self._mock_mav_lock = threading.Lock()
         # Command emission + COMMAND_ACK Future routing live in CommandSender.
         self._commands = CommandSender(
             self._connection,
@@ -131,6 +118,7 @@ class DroneController:
         self._mission = MissionOps(self)
         self._precision = PrecisionLand(self)
         self._safety = SafetyOps(self)
+        self._mock_sim = MockSimulator(self) if mock else None
 
     # ---- MAVLink connection shims (Phase 3) -------------------------------
     # The pymavlink connection, the I/O lock, and target sysid live inside
@@ -188,46 +176,32 @@ class DroneController:
 
     @property
     def _mav_lock(self) -> threading.Lock:
-        if self._connection is None:
-            return self._mock_mav_lock
         return self._connection._lock
 
     @property
     def mav(self):
-        return None if self._connection is None else self._connection.mav
+        return self._connection.mav
 
     @mav.setter
     def mav(self, value):
-        # Used by tests that stub mav directly. Forward to the connection;
-        # in mock mode there is no connection so the value is ignored.
-        if self._connection is not None:
-            self._connection.mav = value
+        # Used by tests that stub mav directly. Forward to the connection.
+        self._connection.mav = value
 
     @property
     def target_system(self) -> int:
-        if self._connection is None:
-            return self._mock_target_system
         return self._connection.target_system
 
     @target_system.setter
     def target_system(self, v: int) -> None:
-        if self._connection is None:
-            self._mock_target_system = v
-        else:
-            self._connection.target_system = v
+        self._connection.target_system = v
 
     @property
     def target_component(self) -> int:
-        if self._connection is None:
-            return self._mock_target_component
         return self._connection.target_component
 
     @target_component.setter
     def target_component(self, v: int) -> None:
-        if self._connection is None:
-            self._mock_target_component = v
-        else:
-            self._connection.target_component = v
+        self._connection.target_component = v
 
     async def connect(self, timeout_s: float = 30.0, baud: int = 57600):
         self._ack_loop = asyncio.get_running_loop()
@@ -249,7 +223,7 @@ class DroneController:
                     logger.warning(f"Viz server failed to start: {e}")
                     self._viz = None
                     self._telemetry.viz = None
-            self._start_mock_sim_thread()
+            self._mock_sim.start()
             return
 
         try:
@@ -284,141 +258,11 @@ class DroneController:
             self._viz_publisher_task_handle.cancel()
         if self._viz is not None:
             self._viz.stop()
-        if self._mock_sim_thread is not None and self._mock_sim_thread.is_alive():
-            self._mock_sim_thread.join(timeout=2.0)
+        if self._mock_sim is not None:
+            self._mock_sim.stop()
         # Heartbeat/receiver threads and the pymavlink socket are owned by the
-        # connection (non-mock only).
-        if self._connection is not None:
-            self._connection.close()
-
-    def _start_mock_sim_thread(self):
-        max_speed_xy = 3.0
-        max_speed_z = 1.5
-        max_yaw_rate = self.yaw_slew_rate_rad
-
-        def loop():
-            last = time.time()
-            while not self._stop_event.is_set():
-                if self._mock_sim_paused:
-                    # Simulated telemetry loss: don't touch _tel at all.
-                    time.sleep(0.01)
-                    last = time.time()
-                    continue
-                now = time.time()
-                dt = max(0.001, min(0.05, now - last))
-                last = now
-
-                with self._setpoint_lock:
-                    sp = dict(self._setpoint)
-
-                with self._tel_lock:
-                    armed = self._tel["armed"]
-                    main_mode = self._tel["main_mode"]
-                    sub_mode = self._tel["sub_mode"]
-                    cx = self._tel["local_x"]
-                    cy = self._tel["local_y"]
-                    cz = self._tel["local_z"]
-                    cyaw = self._tel["yaw"]
-
-                target_x, target_y, target_z, target_yaw = cx, cy, cz, cyaw
-                tracking = False
-
-                if armed and main_mode == PX4_CUSTOM_MAIN_MODE_OFFBOARD:
-                    target_x, target_y, target_z = sp["x"], sp["y"], sp["z"]
-                    if not math.isnan(sp["yaw"]):
-                        target_yaw = sp["yaw"]
-                    tracking = True
-
-                elif armed and main_mode == PX4_CUSTOM_MAIN_MODE_AUTO:
-                    if sub_mode == PX4_CUSTOM_SUB_MODE_AUTO_LAND:
-                        target_x, target_y = cx, cy
-                        target_z = 0.0
-                        tracking = True
-                    elif sub_mode == PX4_CUSTOM_SUB_MODE_AUTO_RTL:
-                        target_x, target_y = 0.0, 0.0
-                        if math.hypot(cx, cy) < 0.5:
-                            target_z = 0.0
-                        else:
-                            target_z = cz
-                        tracking = True
-                    elif sub_mode == PX4_CUSTOM_SUB_MODE_AUTO_TAKEOFF:
-                        target_z = sp["z"] if sp["z"] < cz else cz - 5.0
-                        tracking = True
-                    elif sub_mode == PX4_CUSTOM_SUB_MODE_AUTO_LOITER:
-                        target_x, target_y, target_z = cx, cy, cz
-                        tracking = True
-
-                new_x, new_y, new_z, new_yaw = cx, cy, cz, cyaw
-                vx, vy, vz = 0.0, 0.0, 0.0
-
-                if tracking:
-                    dx = target_x - cx
-                    dy = target_y - cy
-                    dz = target_z - cz
-                    dist_xy = math.hypot(dx, dy)
-                    max_step_xy = max_speed_xy * dt
-                    if dist_xy > max_step_xy:
-                        ratio = max_step_xy / dist_xy
-                        new_x = cx + dx * ratio
-                        new_y = cy + dy * ratio
-                        vx = dx * ratio / dt
-                        vy = dy * ratio / dt
-                    else:
-                        new_x = target_x
-                        new_y = target_y
-                        vx = dx / dt if dt > 0 else 0.0
-                        vy = dy / dt if dt > 0 else 0.0
-
-                    max_step_z = max_speed_z * dt
-                    if abs(dz) > max_step_z:
-                        new_z = cz + math.copysign(max_step_z, dz)
-                        vz = math.copysign(max_speed_z, dz)
-                    else:
-                        new_z = target_z
-                        vz = dz / dt if dt > 0 else 0.0
-
-                    yaw_err = math.atan2(
-                        math.sin(target_yaw - cyaw), math.cos(target_yaw - cyaw)
-                    )
-                    max_yaw_step = max_yaw_rate * dt
-                    if abs(yaw_err) > max_yaw_step:
-                        new_yaw = cyaw + math.copysign(max_yaw_step, yaw_err)
-                    else:
-                        new_yaw = target_yaw
-
-                if new_z > 0:
-                    new_z = 0.0
-
-                with self._tel_lock:
-                    self._tel["local_x"] = new_x
-                    self._tel["local_y"] = new_y
-                    self._tel["local_z"] = new_z
-                    self._tel["yaw"] = new_yaw
-                    self._tel["vx"] = vx
-                    self._tel["vy"] = vy
-                    self._tel["vz"] = vz
-                    self._tel["last_local_pos_ts"] = now
-
-                    if new_z >= -0.05:
-                        self._tel["landed_state"] = 1
-                        if (
-                            self._tel["armed"]
-                            and self._tel["main_mode"] == PX4_CUSTOM_MAIN_MODE_AUTO
-                            and self._tel["sub_mode"]
-                            in (
-                                PX4_CUSTOM_SUB_MODE_AUTO_LAND,
-                                PX4_CUSTOM_SUB_MODE_AUTO_RTL,
-                            )
-                        ):
-                            self._tel["armed"] = False
-                            logger.info("[MOCK] Auto-disarmed after land")
-                    elif self._tel["armed"]:
-                        self._tel["landed_state"] = 2
-
-                time.sleep(0.01)
-
-        self._mock_sim_thread = threading.Thread(target=loop, daemon=True, name="mock-sim")
-        self._mock_sim_thread.start()
+        # connection object.
+        self._connection.close()
 
     def _handle_message(self, msg):
         # Parsing lives in Telemetry; this delegate preserves the historical
