@@ -70,25 +70,25 @@ import asyncio
 from mavpilot import DroneController
 
 async def mission():
-    drone = DroneController(
+    # `async with` подключается на входе и завершает работу на выходе (aclose());
+    # если блок выходит из-за исключения и дрон ещё в воздухе — сначала
+    # вызывается emergency_land().
+    async with DroneController(
         connection_string="udp:127.0.0.1:14540",  # SITL по умолчанию
         enable_viz=True,   # визуализация в браузере на :8765
-    )
+    ) as drone:
+        await drone.apply_safe_params()  # рекомендуемые параметры безопасности PX4
+        await drone.wait_until_ready()   # ждём EKF / LOCAL_POSITION_NED
 
-    await drone.connect()
-    await drone.apply_safe_params()  # рекомендуемые параметры безопасности PX4
-    await drone.wait_until_ready()   # ждём EKF / LOCAL_POSITION_NED
+        await drone.takeoff(altitude_m=5.0)
 
-    await drone.takeoff(altitude_m=5.0)
+        # Координаты NED (x=Север, y=Восток, z=Вниз)
+        await drone.goto(x=10, y=0, z=-5)
+        await drone.goto(x=10, y=10, z=-5, yaw_deg=90)
+        await drone.goto_body_relative(forward_m=5, right_m=0, down_m=0)
+        await drone.hover(duration_s=3.0)
 
-    # Координаты NED (x=Север, y=Восток, z=Вниз)
-    await drone.goto(x=10, y=0, z=-5)
-    await drone.goto(x=10, y=10, z=-5, yaw_deg=90)
-    await drone.goto_body_relative(forward_m=5, right_m=0, down_m=0)
-    await drone.hover(duration_s=3.0)
-
-    await drone.land()
-    drone.close()
+        await drone.land()
 
 asyncio.run(mission())
 ```
@@ -106,21 +106,19 @@ def get_marker() -> MarkerObservation | None:
     return MarkerObservation(dx=0.3, dy=-0.1)
 
 async def mission():
-    drone = DroneController(mock=True, enable_viz=False)
-    await drone.connect()
-    await drone.takeoff(altitude_m=10.0)
-    result = await drone.precision_land(
-        get_marker_offset=get_marker,
-        descent_rate_mps=0.3,
-        final_altitude_m=0.5,
-        horizontal_tolerance_m=0.15,
-        min_altitude_floor_m=0.3,   # новый параметр в v0.2.0
-    )
-    if not result:
-        # status ∈ {ABORTED_AT_FLOOR, MARKER_LOST, TIMEOUT}
-        print(f"precision_land не приземлился: {result.status.value}")
-        print(f"финальная позиция: {result.final_position}")
-    drone.close()
+    async with DroneController(mock=True, enable_viz=False) as drone:
+        await drone.takeoff(altitude_m=10.0)
+        result = await drone.precision_land(
+            get_marker_offset=get_marker,
+            descent_rate_mps=0.3,
+            final_altitude_m=0.5,
+            horizontal_tolerance_m=0.15,
+            min_altitude_floor_m=0.3,   # новый параметр в v0.2.0
+        )
+        if not result:
+            # status ∈ {ABORTED_AT_FLOOR, MARKER_LOST, TIMEOUT}
+            print(f"precision_land не приземлился: {result.status.value}")
+            print(f"финальная позиция: {result.final_position}")
 ```
 
 ### Перевод пикселей камеры в смещение в теле дрона
@@ -205,7 +203,8 @@ DroneController(
 | `await precision_land(callback, …)` | Визуально-направляемый спуск; возвращает `PrecisionLandResult` |
 | `await return_to_launch(timeout_s)` | AUTO_RTL, ждать приземления |
 | `await emergency_land()` | Цепочка: AUTO_LAND → NAV_LAND → DO_FLIGHTTERMINATION |
-| `close()` | Остановить все потоки, закрыть соединение |
+| `await aclose()` / `async with` | Остановить потоки и закрыть соединение (рекомендуется) |
+| `close()` | Синхронное завершение (устарело; используйте `aclose()`) |
 
 ### Телеметрия
 
