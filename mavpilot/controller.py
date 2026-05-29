@@ -25,6 +25,7 @@ from .constants import (
     PX4_CUSTOM_SUB_MODE_AUTO_TAKEOFF,
 )
 from ._connection import MAVLinkConnection
+from ._telemetry import Telemetry
 from .types import Position, MarkerObservation
 from .utils import int_to_float_bits, body_to_ned
 from .viz import VizServer
@@ -98,7 +99,10 @@ class DroneController:
         self._streamer_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
-        self._tel_lock = threading.Lock()
+        # Telemetry state + parsing live in the Telemetry collaborator. The
+        # controller keeps self._tel / self._tel_lock property shims (below)
+        # for the many call sites that still read them directly.
+        self._telemetry = Telemetry(self._connection)
         # The MAVLink I/O lock now lives inside MAVLinkConnection. This
         # fallback lock is only used in mock mode (no real connection) so the
         # `with self._mav_lock:` blocks still work; nothing real is guarded.
@@ -114,31 +118,13 @@ class DroneController:
         # telemetry (freezes last_local_pos_ts), simulating an autopilot link
         # going silent. Used to exercise the telemetry watchdog in tests.
         self._mock_sim_paused = False
-        self._tel: dict = {
-            "armed": False,
-            "custom_mode": 0,
-            "main_mode": 0,
-            "sub_mode": 0,
-            "local_x": 0.0,
-            "local_y": 0.0,
-            "local_z": 0.0,
-            "vx": 0.0,
-            "vy": 0.0,
-            "vz": 0.0,
-            "yaw": 0.0,
-            "roll": 0.0,
-            "pitch": 0.0,
-            "battery_remaining": 1.0,
-            "landed_state": 0,
-            "ekf_healthy": True,
-            "local_position_ok": False,
-            "last_local_pos_ts": 0.0,
-            "last_ack": None,
-        }
 
         self._viz: Optional[VizServer] = (
             VizServer(port=viz_port, host=viz_host) if enable_viz else None
         )
+        # Wire telemetry's outbound hooks now that viz exists.
+        self._telemetry.viz = self._viz
+        self._telemetry.route_ack = self._route_command_ack
         self._viz_publisher_task_handle: Optional[asyncio.Task] = None
 
         self._shutdown_requested = False
@@ -149,6 +135,14 @@ class DroneController:
     # self._connection (non-mock). These properties keep the historical
     # attribute surface (self.mav, self._mav_lock, self.target_system, …)
     # working for call sites and tests during the decomposition.
+
+    @property
+    def _tel(self) -> dict:
+        return self._telemetry._tel
+
+    @property
+    def _tel_lock(self) -> threading.Lock:
+        return self._telemetry._lock
 
     @property
     def _mav_lock(self) -> threading.Lock:
@@ -212,6 +206,7 @@ class DroneController:
                 except OSError as e:
                     logger.warning(f"Viz server failed to start: {e}")
                     self._viz = None
+                    self._telemetry.viz = None
             self._start_mock_sim_thread()
             return
 
@@ -237,6 +232,7 @@ class DroneController:
             except OSError as e:
                 logger.warning(f"Viz server failed to start (port busy?): {e}")
                 self._viz = None
+                self._telemetry.viz = None
 
     def close(self):
         self._shutdown_requested = True
@@ -384,66 +380,9 @@ class DroneController:
         self._mock_sim_thread.start()
 
     def _handle_message(self, msg):
-        t = msg.get_type()
-        try:
-            if msg.get_srcSystem() != self.target_system and self.target_system != 0:
-                return
-        except Exception:
-            pass
-        now = time.time()
-        with self._tel_lock:
-            if t == "HEARTBEAT":
-                self._tel["armed"] = bool(
-                    msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
-                )
-                cm = msg.custom_mode
-                self._tel["custom_mode"] = cm
-                self._tel["main_mode"] = (cm >> 16) & 0xFF
-                self._tel["sub_mode"] = (cm >> 24) & 0xFF
-            elif t == "LOCAL_POSITION_NED":
-                self._tel["local_x"] = msg.x
-                self._tel["local_y"] = msg.y
-                self._tel["local_z"] = msg.z
-                self._tel["vx"] = msg.vx
-                self._tel["vy"] = msg.vy
-                self._tel["vz"] = msg.vz
-                self._tel["last_local_pos_ts"] = now
-                self._tel["local_position_ok"] = True
-            elif t == "ATTITUDE":
-                self._tel["roll"] = msg.roll
-                self._tel["pitch"] = msg.pitch
-                self._tel["yaw"] = msg.yaw
-            elif t == "EXTENDED_SYS_STATE":
-                self._tel["landed_state"] = msg.landed_state
-            elif t == "BATTERY_STATUS":
-                if msg.battery_remaining >= 0:
-                    self._tel["battery_remaining"] = msg.battery_remaining / 100.0
-            elif t == "SYS_STATUS":
-                # Bit MAV_SYS_STATUS_AHRS = 1<<5 = 32. Health bit set if EKF OK.
-                health = getattr(msg, "onboard_control_sensors_health", 0)
-                self._tel["ekf_healthy"] = bool(health & 32)
-            elif t == "STATUSTEXT":
-                text = msg.text.rstrip("\0\t ") if isinstance(msg.text, str) else msg.text
-                sev = msg.severity
-                if sev <= 3:
-                    logger.error(f"PX4: {text}")
-                elif sev <= 5:
-                    logger.warning(f"PX4: {text}")
-                else:
-                    logger.info(f"PX4: {text}")
-                if self._viz is not None:
-                    self._viz.publish({
-                        "type": "log",
-                        "severity": sev,
-                        "text": text,
-                        "ts": now,
-                    })
-            elif t == "COMMAND_ACK":
-                r = ACK_RESULT_NAMES.get(msg.result, str(msg.result))
-                self._tel["last_ack"] = (msg.command, msg.result)
-                level = logging.INFO if msg.result == 0 else logging.WARNING
-                logger.log(level, f"ACK cmd={msg.command} result={r}")
-                self._route_command_ack(msg.command, msg.result)
+        # Parsing lives in Telemetry; this delegate preserves the historical
+        # entry point (the connection's receiver thread and some tests call it).
+        self._telemetry.handle_message(msg)
 
     def _route_command_ack(self, command: int, result: int) -> None:
         """Resolve the pending Future for (command, target_sys, target_comp).
@@ -562,35 +501,28 @@ class DroneController:
         )
 
     def get_local_position(self) -> Position:
-        with self._tel_lock:
-            return Position(self._tel["local_x"], self._tel["local_y"], self._tel["local_z"])
+        return self._telemetry.get_local_position()
 
     def get_yaw_rad(self) -> float:
-        with self._tel_lock:
-            return self._tel["yaw"]
+        return self._telemetry.get_yaw_rad()
 
     def get_yaw_deg(self) -> float:
-        from .utils import normalize_yaw_deg
-        return normalize_yaw_deg(math.degrees(self.get_yaw_rad()))
+        return self._telemetry.get_yaw_deg()
 
     def is_armed(self) -> bool:
-        with self._tel_lock:
-            return self._tel["armed"]
+        return self._telemetry.is_armed()
 
     def get_main_mode(self) -> int:
-        with self._tel_lock:
-            return self._tel["main_mode"]
+        return self._telemetry.get_main_mode()
 
     def get_sub_mode(self) -> int:
-        with self._tel_lock:
-            return self._tel["sub_mode"]
+        return self._telemetry.get_sub_mode()
 
     def is_offboard(self) -> bool:
-        return self.get_main_mode() == PX4_CUSTOM_MAIN_MODE_OFFBOARD
+        return self._telemetry.is_offboard()
 
     def landed_state(self) -> int:
-        with self._tel_lock:
-            return self._tel["landed_state"]
+        return self._telemetry.landed_state()
 
     def _set_setpoint_position(
         self,
