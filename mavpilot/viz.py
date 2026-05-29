@@ -1,15 +1,19 @@
 """Visualization server: HTTP + SSE, serves the bundled single-page 3D UI."""
 import json
 import logging
-import os
 import queue
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib import resources
 from typing import Optional
 
 logger = logging.getLogger("drone")
 
-_VIZ_HTML_PATH = os.path.join(os.path.dirname(__file__), "_viz.html")
+
+def _load_viz_html() -> bytes:
+    """Read the bundled _viz.html via importlib.resources so it works in
+    zipped wheels / PyInstaller installs where os.path.dirname is fragile."""
+    return (resources.files("mavpilot") / "_viz.html").read_bytes()
 
 
 def _sanitize_for_json(obj):
@@ -63,8 +67,7 @@ class VizServer:
 
             def _serve_html(self):
                 try:
-                    with open(_VIZ_HTML_PATH, "rb") as f:
-                        data = f.read()
+                    data = _load_viz_html()
                 except Exception:
                     self.send_response(500)
                     self.end_headers()
