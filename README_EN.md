@@ -260,6 +260,8 @@ The right-hand panel displays:
 - Command log (takeoff, goto, land, …)
 - PX4 STATUSTEXT messages
 
+The UI is composed of native ES modules served from `mavpilot/viz/static/` (`index.html` + `styles.css` + `main.js`/`scene.js`/`sse.js`/`telemetry.js`/`log.js`) — no bundler, but a **modern browser with ES-module support** is required. The `max_clients` parameter (default 32) caps concurrent SSE connections; excess clients receive HTTP 503.
+
 ---
 
 ## Architecture

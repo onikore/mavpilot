@@ -260,6 +260,8 @@ from mavpilot.utils import body_to_ned, ned_to_body, pixel_to_body_offset
 - Лог команд (взлёт, goto, посадка, …)
 - Сообщения PX4 STATUSTEXT
 
+UI состоит из нативных ES-модулей, раздаваемых из `mavpilot/viz/static/` (`index.html` + `styles.css` + `main.js`/`scene.js`/`sse.js`/`telemetry.js`/`log.js`) — без сборщика, но нужен **современный браузер с поддержкой ES-модулей**. Параметр `max_clients` (по умолчанию 32) ограничивает число одновременных SSE-подключений; лишним клиентам возвращается HTTP 503.
+
 ---
 
 ## Архитектура
