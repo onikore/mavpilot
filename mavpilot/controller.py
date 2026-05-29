@@ -251,6 +251,8 @@ class DroneController:
                 self._telemetry.viz = None
 
     def close(self):
+        """Synchronous shutdown. Prefer ``await aclose()`` or
+        ``async with DroneController(...)``; this remains for back-compat."""
         self._shutdown_requested = True
         self._stop_event.set()
         self._streamer.stop()
@@ -263,6 +265,33 @@ class DroneController:
         # Heartbeat/receiver threads and the pymavlink socket are owned by the
         # connection object.
         self._connection.close()
+
+    async def aclose(self) -> None:
+        """Async shutdown: cancel the viz publisher task (awaiting it) then
+        stop all threads and close the connection."""
+        self._shutdown_requested = True
+        if self._viz_publisher_task_handle is not None:
+            self._viz_publisher_task_handle.cancel()
+            try:
+                await self._viz_publisher_task_handle
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._viz_publisher_task_handle = None
+        self.close()
+
+    async def __aenter__(self) -> "DroneController":
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        # If we exit via an exception while still armed mid-air, attempt an
+        # emergency land before tearing down the connection.
+        if exc is not None and self.is_armed():
+            try:
+                await self.emergency_land()
+            except Exception as e:
+                logger.error(f"emergency_land during __aexit__ failed: {e}")
+        await self.aclose()
 
     def _handle_message(self, msg):
         # Parsing lives in Telemetry; this delegate preserves the historical

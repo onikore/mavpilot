@@ -3,7 +3,8 @@ import time
 
 import pytest
 
-from mavpilot.controller import DroneController, DroneError
+from mavpilot.controller import DroneController
+from mavpilot.errors import DroneError
 
 
 @pytest.mark.asyncio
