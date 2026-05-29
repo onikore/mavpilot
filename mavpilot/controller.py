@@ -25,6 +25,7 @@ from ._commands import CommandSender
 from ._connection import MAVLinkConnection
 from ._mission import MissionOps
 from ._precision_land import PrecisionLand
+from ._safety import SafetyOps
 from ._streamer import OffboardStreamer
 from ._telemetry import Telemetry
 from .errors import DroneError
@@ -129,6 +130,7 @@ class DroneController:
         )
         self._mission = MissionOps(self)
         self._precision = PrecisionLand(self)
+        self._safety = SafetyOps(self)
 
     # ---- MAVLink connection shims (Phase 3) -------------------------------
     # The pymavlink connection, the I/O lock, and target sysid live inside
@@ -442,26 +444,8 @@ class DroneController:
         )
 
     async def wait_until_ready(self, timeout_s: float = 60.0):
-        """Block until EKF reports a fresh LOCAL_POSITION_NED."""
-        if self._mock:
-            logger.info("[MOCK] EKF ready (instant)")
-            return
-        logger.info("Waiting for EKF (LOCAL_POSITION_NED)...")
-        start = time.time()
-        pos_ok = ekf_ok = False
-        while time.time() - start < timeout_s:
-            with self._tel_lock:
-                pos_ok = self._tel["local_position_ok"] and (
-                    time.time() - self._tel["last_local_pos_ts"] < 2.0
-                )
-                ekf_ok = self._tel["ekf_healthy"]
-            if pos_ok and ekf_ok:
-                logger.info("EKF ready")
-                return
-            await asyncio.sleep(0.5)
-        raise DroneError(
-            f"EKF readiness timeout (pos_ok={pos_ok}, ekf_healthy={ekf_ok})"
-        )
+        """Block until EKF reports a fresh LOCAL_POSITION_NED + AHRS health."""
+        return await self._safety.wait_until_ready(timeout_s=timeout_s)
 
     def get_local_position(self) -> Position:
         return self._telemetry.get_local_position()
