@@ -144,6 +144,7 @@ class DroneController:
         # Wire telemetry's outbound hooks now that viz exists.
         self._telemetry.viz = self._viz
         self._telemetry.route_ack = self._commands.route_command_ack
+        self._telemetry.route_param = self._commands.route_param_value
         self._viz_publisher_task_handle: asyncio.Task | None = None
 
         self._shutdown_requested = False

@@ -56,6 +56,7 @@ class Telemetry:
         # Wired by the controller after construction.
         self.viz: VizServer | None = None
         self.route_ack: Callable[[int, int], None] = lambda command, result: None
+        self.route_param: Callable[[object, float], None] = lambda param_id, value: None
 
     @property
     def target_system(self) -> int:
@@ -123,6 +124,9 @@ class Telemetry:
                 level = logging.INFO if msg.result == 0 else logging.WARNING
                 logger.log(level, f"ACK cmd={msg.command} result={r}")
                 self.route_ack(msg.command, msg.result)
+            elif t == "PARAM_VALUE":
+                # Forwarded to CommandSender for set_param_checked read-back.
+                self.route_param(msg.param_id, msg.param_value)
 
     # ---- typed getters ----------------------------------------------------
 
