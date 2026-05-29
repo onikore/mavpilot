@@ -34,6 +34,7 @@ class Telemetry:
         self._lock = threading.Lock()
         self._tel: dict = {
             "armed": False,
+            "ever_armed": False,
             "custom_mode": 0,
             "main_mode": 0,
             "sub_mode": 0,
@@ -74,6 +75,8 @@ class Telemetry:
                 self._tel["armed"] = bool(
                     msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
                 )
+                if self._tel["armed"]:
+                    self._tel["ever_armed"] = True
                 cm = msg.custom_mode
                 self._tel["custom_mode"] = cm
                 self._tel["main_mode"] = (cm >> 16) & 0xFF
@@ -144,6 +147,15 @@ class Telemetry:
     def is_armed(self) -> bool:
         with self._lock:
             return bool(self._tel["armed"])
+
+    def ever_armed(self) -> bool:
+        """Whether the vehicle has been armed at any point this session.
+
+        Sticky — stays True after disarm or telemetry loss. Used by the safety
+        path so a frozen-telemetry ``is_armed()==False`` doesn't skip landing.
+        """
+        with self._lock:
+            return bool(self._tel["ever_armed"])
 
     def get_main_mode(self) -> int:
         with self._lock:

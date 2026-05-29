@@ -320,6 +320,8 @@ class CommandSender:
         if self._mock:
             with tel._lock:
                 tel._tel["armed"] = arm
+                if arm:
+                    tel._tel["ever_armed"] = True
             logger.info(f"[MOCK] {'Armed' if arm else 'Disarmed'}")
             await asyncio.sleep(0.05)
             return True
