@@ -1,0 +1,54 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; background: #0a0d1a; color: #d6e2ff;
+  font-family: ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace; overflow: hidden; }
+body { display: grid; grid-template-columns: 1fr 340px; grid-template-rows: 1fr; }
+#stage { position: relative; overflow: hidden; background: #0a0d1a; }
+#stage canvas { display: block; outline: none; }
+#panel { background: #0e1428; border-left: 1px solid #1f2a4a;
+  padding: 14px; overflow-y: auto; font-size: 12px; }
+h2 { font-size: 11px; color: #6c8cd5; text-transform: uppercase;
+  letter-spacing: 1.5px; margin-bottom: 6px; margin-top: 12px; }
+h2:first-child { margin-top: 0; }
+.kv { display: grid; grid-template-columns: 100px 1fr; gap: 4px 8px;
+  margin-bottom: 8px; }
+.kv .k { color: #6c8cd5; }
+.kv .v { color: #ffffff; font-weight: 500; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 3px;
+  font-size: 10px; font-weight: 600; letter-spacing: 0.5px; }
+.badge.armed { background: #2da14a; color: white; }
+.badge.disarmed { background: #555; color: #ccc; }
+.mode-OFFBOARD { color: #4dd0e1; }
+.mode-AUTO { color: #ba68c8; }
+.mode-POSCTL { color: #81c784; }
+.mode-MANUAL { color: #ffd54f; }
+#log { font-size: 11px; max-height: 180px; overflow-y: auto;
+  background: #060814; padding: 8px; border-radius: 3px;
+  border: 1px solid #1f2a4a; }
+#log .line { padding: 1px 0; white-space: pre-wrap;
+  word-break: break-word; line-height: 1.4; }
+#log .sev-err { color: #ff5a5a; }
+#log .sev-warn { color: #ffaa3a; }
+#log .sev-info { color: #6a8cb5; }
+#cmdlog { max-height: 200px; overflow-y: auto; }
+#cmdlog .line { padding: 3px 0; border-bottom: 1px solid #1f2a4a; }
+#cmdlog .cmd-name { color: #4dd0e1; font-weight: 600; }
+#hud { position: absolute; left: 12px; bottom: 12px;
+  background: rgba(10, 13, 26, 0.85); padding: 8px 12px;
+  border-radius: 4px; font-size: 11px; color: #6c8cd5;
+  line-height: 1.6; border: 1px solid #1f2a4a; pointer-events: none; }
+#hud .axis-row { display: flex; align-items: center; gap: 8px; }
+#hud .swatch { display: inline-block; width: 12px; height: 12px;
+  border-radius: 2px; }
+#conn { position: absolute; right: 12px; top: 12px;
+  padding: 6px 10px; border-radius: 3px; font-size: 11px; z-index: 10; }
+#conn.online { background: #2da14a; color: white; }
+#conn.offline { background: #b03030; color: white; }
+#loading { position: absolute; inset: 0; display: flex;
+  align-items: center; justify-content: center; color: #6c8cd5;
+  font-size: 14px; background: #0a0d1a; z-index: 5; }
+.battery-bar { display: inline-block; width: 60px; height: 8px;
+  background: #222; border-radius: 2px; overflow: hidden;
+  vertical-align: middle; margin-left: 4px; }
+.battery-bar > div { height: 100%; background: linear-gradient(90deg, #ff5a5a, #ffaa3a, #4dd0e1); }
+#active-cmd { background: #060814; padding: 8px; border-radius: 3px;
+  border: 1px solid #1f2a4a; min-height: 30px; font-size: 12px; }

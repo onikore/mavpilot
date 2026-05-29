@@ -70,25 +70,25 @@ import asyncio
 from mavpilot import DroneController
 
 async def mission():
-    drone = DroneController(
+    # `async with` connects on entry and tears down on exit (aclose());
+    # if the block exits via an exception while still armed, it triggers
+    # emergency_land() first.
+    async with DroneController(
         connection_string="udp:127.0.0.1:14540",  # SITL default
         enable_viz=True,   # browser viz on :8765
-    )
+    ) as drone:
+        await drone.apply_safe_params()  # recommended PX4 safety params
+        await drone.wait_until_ready()   # wait for EKF / LOCAL_POSITION_NED
 
-    await drone.connect()
-    await drone.apply_safe_params()  # recommended PX4 safety params
-    await drone.wait_until_ready()   # wait for EKF / LOCAL_POSITION_NED
+        await drone.takeoff(altitude_m=5.0)
 
-    await drone.takeoff(altitude_m=5.0)
+        # NED coordinates (x=North, y=East, z=Down)
+        await drone.goto(x=10, y=0, z=-5)
+        await drone.goto(x=10, y=10, z=-5, yaw_deg=90)
+        await drone.goto_body_relative(forward_m=5, right_m=0, down_m=0)
+        await drone.hover(duration_s=3.0)
 
-    # NED coordinates (x=North, y=East, z=Down)
-    await drone.goto(x=10, y=0, z=-5)
-    await drone.goto(x=10, y=10, z=-5, yaw_deg=90)
-    await drone.goto_body_relative(forward_m=5, right_m=0, down_m=0)
-    await drone.hover(duration_s=3.0)
-
-    await drone.land()
-    drone.close()
+        await drone.land()
 
 asyncio.run(mission())
 ```
@@ -106,16 +106,19 @@ def get_marker() -> MarkerObservation | None:
     return MarkerObservation(dx=0.3, dy=-0.1)
 
 async def mission():
-    drone = DroneController(mock=True, enable_viz=False)
-    await drone.connect()
-    await drone.takeoff(altitude_m=10.0)
-    await drone.precision_land(
-        get_marker_offset=get_marker,
-        descent_rate_mps=0.3,
-        final_altitude_m=0.5,
-        horizontal_tolerance_m=0.15,
-    )
-    drone.close()
+    async with DroneController(mock=True, enable_viz=False) as drone:
+        await drone.takeoff(altitude_m=10.0)
+        result = await drone.precision_land(
+            get_marker_offset=get_marker,
+            descent_rate_mps=0.3,
+            final_altitude_m=0.5,
+            horizontal_tolerance_m=0.15,
+            min_altitude_floor_m=0.3,   # new in v0.2.0
+        )
+        if not result:
+            # status ∈ {ABORTED_AT_FLOOR, MARKER_LOST, TIMEOUT}
+            print(f"precision_land did not land cleanly: {result.status.value}")
+            print(f"final position: {result.final_position}")
 ```
 
 ### Converting camera pixels to body offset
@@ -144,10 +147,25 @@ Options:
   --connection STR      MAVLink endpoint  [default: udp:127.0.0.1:14540]
   --mock                Hardware-free simulator mode
   --viz-port INT        Browser visualization port  [default: 8765]
+  --viz-host STR        Interface the visualization server binds to  [default: 127.0.0.1]
+                        Use 0.0.0.0 to expose on LAN (telemetry visible to everyone on the network)
   --no-viz              Disable browser visualization
   --precision-land      Use precision landing with a simulated marker
   --pattern {square,star}  Demo flight pattern  [default: square]
 ```
+
+### Error handling and Ctrl-C
+
+- **Ctrl-C** at any point during a mission calls `emergency_land()`. This chains: `AUTO_LAND` mode switch, wait up to 10 s for touchdown, send `MAV_CMD_NAV_LAND` if mode switch is stuck, and as a last resort `DO_FLIGHTTERMINATION` (immediate motor cut — drone falls).
+- **RTL is not part of `emergency_land()`**. Return-to-launch is a separate nominal operation (`drone.return_to_launch()`), not an emergency procedure.
+- Any unhandled exception in the mission body (including `KeyboardInterrupt`) also triggers `emergency_land()`.
+
+### Telemetry watchdog & protocol safety (v0.2.0)
+
+- **Telemetry watchdog** — `telemetry_watchdog_s` (default 2 s). If no fresh `LOCAL_POSITION_NED` arrives within this window, the streamer latches a watchdog flag and the next mission call (`takeoff`/`goto`/`set_yaw`/`land`/`return_to_launch`/`precision_land`) raises `DroneError`. `emergency_land()` deliberately ignores the flag — it is the recovery path the watchdog is meant to trigger.
+- **EKF health gate** — `wait_until_ready()` now also validates EKF AHRS health (`SYS_STATUS` bit 5), not just position freshness.
+- **`send_command_long()`** — exposes the COMMAND_ACK Future API: it awaits the terminal ACK keyed by `(cmd_id, target_sys, target_comp)`. `IN_PROGRESS` extends the deadline; a duplicate in-flight command, a timeout, or a non-`ACCEPTED` result each raise `DroneError`.
+- **`get_yaw_deg()`** is normalized to `[-180, 180]`.
 
 ---
 
@@ -182,10 +200,11 @@ DroneController(
 | `await set_yaw(yaw_deg, timeout_s)` | Rotate in-place |
 | `await hover(duration_s)` | Hold position |
 | `await land(timeout_s)` | Switch to AUTO_LAND, wait until on ground |
-| `await precision_land(callback, …)` | Vision-guided descent |
+| `await precision_land(callback, …)` | Vision-guided descent; returns `PrecisionLandResult` |
 | `await return_to_launch(timeout_s)` | Switch to AUTO_RTL, wait until landed |
-| `await emergency_land()` | Best-effort land + flight termination fallback |
-| `close()` | Stop all threads and close connection |
+| `await emergency_land()` | Chain: AUTO_LAND → NAV_LAND → DO_FLIGHTTERMINATION |
+| `await aclose()` / `async with` | Stop all threads and close connection (preferred) |
+| `close()` | Synchronous teardown (deprecated; prefer `aclose()`) |
 
 ### Telemetry
 
@@ -240,6 +259,8 @@ The right-hand panel displays:
 - Command log (takeoff, goto, land, …)
 - PX4 STATUSTEXT messages
 
+The UI is composed of native ES modules served from `mavpilot/viz/static/` (`index.html` + `styles.css` + `main.js`/`scene.js`/`sse.js`/`telemetry.js`/`log.js`) — no bundler, but a **modern browser with ES-module support** is required. The `max_clients` parameter (default 32) caps concurrent SSE connections; excess clients receive HTTP 503.
+
 ---
 
 ## Architecture
@@ -257,6 +278,29 @@ asyncio event loop  <-- your mission code
 ```
 
 All shared state is protected by `_tel_lock` and `_setpoint_lock`. No asyncio primitives are needed in user mission code — the asyncio loop and background threads only touch shared dicts through these locks.
+
+### Module layout (v0.2.0)
+
+```
+mavpilot/
+├── controller.py          # DroneController facade (composition root)
+├── _connection.py         # MAVLinkConnection — pymavlink + I/O lock + heartbeat/receiver
+├── _telemetry.py          # Telemetry — incoming-message parsing + state cache
+├── _commands.py           # CommandSender — COMMAND_LONG with asyncio.Future ACK routing
+├── _streamer.py           # OffboardStreamer — setpoint thread + telemetry watchdog
+├── _mission.py            # MissionOps — takeoff/goto/hover/land/rtl/emergency_land
+├── _precision_land.py     # PrecisionLand — vision descent with altitude floor
+├── _safety.py             # SafetyOps — wait_until_ready
+├── _mock.py               # MockMavConnection + in-process simulator
+├── errors.py              # DroneError
+├── types.py               # Position, MarkerObservation, PrecisionLand{Status,Result}
+├── utils.py               # coordinate transforms, pinhole, yaw normalization
+├── constants.py           # PX4 mode bits, MAV_CMD ids, type_masks
+├── cli.py                 # argparse entrypoint
+└── viz.py                 # browser UI server (HTTP + SSE)
+```
+
+Every MAVLink send and recv goes through `MAVLinkConnection`, which holds the single threading lock. Each subsystem receives its dependencies via constructor injection — easy to mock in tests.
 
 ---
 

@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drone 3D Viz</title>
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div id="stage">
+    <div id="loading">Loading three.js...</div>
+    <div id="hud">
+      <div class="axis-row"><span class="swatch" style="background:#ff5050"></span> North (NED +X)</div>
+      <div class="axis-row"><span class="swatch" style="background:#50ff50"></span> East (NED +Y)</div>
+      <div class="axis-row"><span class="swatch" style="background:#5080ff"></span> Down (NED +Z)</div>
+      <div style="margin-top:6px; opacity:0.7">drag · scroll · right-drag</div>
+    </div>
+    <div id="conn" class="offline">disconnected</div>
+  </div>
+  <div id="panel">
+    <h2>Status</h2>
+    <div class="kv">
+      <div class="k">Armed</div><div class="v"><span id="armed-badge" class="badge disarmed">DISARMED</span></div>
+      <div class="k">Mode</div><div class="v" id="mode">—</div>
+      <div class="k">Landed</div><div class="v" id="landed">—</div>
+      <div class="k">Stream</div><div class="v" id="stream">—</div>
+      <div class="k">Battery</div><div class="v" id="battery">— <span class="battery-bar"><div id="bbar" style="width:0%"></div></span></div>
+    </div>
+
+    <h2>Position (NED, m)</h2>
+    <div class="kv">
+      <div class="k">North (X)</div><div class="v" id="px">0.00</div>
+      <div class="k">East (Y)</div><div class="v" id="py">0.00</div>
+      <div class="k">Down (Z)</div><div class="v" id="pz">0.00</div>
+      <div class="k">Altitude</div><div class="v" id="alt">0.00 m</div>
+      <div class="k">Yaw</div><div class="v" id="yaw">0°</div>
+      <div class="k">Speed</div><div class="v" id="spd">0.0 m/s</div>
+    </div>
+
+    <h2>Active Setpoint</h2>
+    <div class="kv">
+      <div class="k">SP X</div><div class="v" id="spx">—</div>
+      <div class="k">SP Y</div><div class="v" id="spy">—</div>
+      <div class="k">SP Z</div><div class="v" id="spz">—</div>
+      <div class="k">SP Yaw</div><div class="v" id="spyaw">keep</div>
+    </div>
+
+    <h2>Active Command</h2>
+    <div id="active-cmd">none</div>
+
+    <h2>Command Log</h2>
+    <div id="cmdlog"></div>
+
+    <h2>PX4 Log</h2>
+    <div id="log"></div>
+  </div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module" src="./main.js"></script>
+</body>
+</html>

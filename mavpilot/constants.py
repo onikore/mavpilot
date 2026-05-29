@@ -2,6 +2,7 @@
 
 Centralises magic numbers so other modules can import them cleanly.
 """
+
 # NAVIGATION_STATE from msg/VehicleStatus.msg
 NAV_STATE_MANUAL = 0
 NAV_STATE_ALTCTL = 1
@@ -57,7 +58,5 @@ POS_TARGET_MASK_YAW_RATE_IGNORE = 2048
 
 # Default: position active, velocity/accel/yaw_rate ignored, yaw active
 DEFAULT_POS_TYPE_MASK = (
-    POS_TARGET_MASK_VEL_IGNORE
-    | POS_TARGET_MASK_ACC_IGNORE
-    | POS_TARGET_MASK_YAW_RATE_IGNORE
+    POS_TARGET_MASK_VEL_IGNORE | POS_TARGET_MASK_ACC_IGNORE | POS_TARGET_MASK_YAW_RATE_IGNORE
 )

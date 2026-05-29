@@ -1,8 +1,0 @@
-# Runtime
-pymavlink
-
-# Development / testing
-pytest
-black
-ruff
-mypy
