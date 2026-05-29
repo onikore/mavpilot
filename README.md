@@ -162,6 +162,13 @@ python -m mavpilot [ОПЦИИ]
 - **RTL не входит в `emergency_land()`**. Возврат на точку старта — это отдельная штатная операция (`drone.return_to_launch()`), не аварийная.
 - Любое необработанное исключение в миссии (включая `KeyboardInterrupt`) также вызывает `emergency_land()`.
 
+### Watchdog телеметрии и протокольная безопасность (v0.2.0)
+
+- **Watchdog телеметрии** — `telemetry_watchdog_s` (по умолчанию 2 с). Если за это окно не приходит свежий `LOCAL_POSITION_NED`, стример выставляет флаг watchdog, и следующий вызов миссии (`takeoff`/`goto`/`set_yaw`/`land`/`return_to_launch`/`precision_land`) бросает `DroneError`. `emergency_land()` намеренно игнорирует флаг — это путь восстановления, ради которого watchdog и срабатывает.
+- **Проверка здоровья EKF** — `wait_until_ready()` теперь проверяет ещё и здоровье EKF AHRS (`SYS_STATUS`, бит 5), а не только свежесть позиции.
+- **`send_command_long()`** — даёт доступ к COMMAND_ACK через Future: ожидает финальный ACK по ключу `(cmd_id, target_sys, target_comp)`. `IN_PROGRESS` продлевает дедлайн; дубликат команды в полёте, таймаут или не-`ACCEPTED` результат бросают `DroneError`.
+- **`get_yaw_deg()`** нормализован к `[-180, 180]`.
+
 ---
 
 ## Справочник API

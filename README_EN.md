@@ -162,6 +162,13 @@ Options:
 - **RTL is not part of `emergency_land()`**. Return-to-launch is a separate nominal operation (`drone.return_to_launch()`), not an emergency procedure.
 - Any unhandled exception in the mission body (including `KeyboardInterrupt`) also triggers `emergency_land()`.
 
+### Telemetry watchdog & protocol safety (v0.2.0)
+
+- **Telemetry watchdog** — `telemetry_watchdog_s` (default 2 s). If no fresh `LOCAL_POSITION_NED` arrives within this window, the streamer latches a watchdog flag and the next mission call (`takeoff`/`goto`/`set_yaw`/`land`/`return_to_launch`/`precision_land`) raises `DroneError`. `emergency_land()` deliberately ignores the flag — it is the recovery path the watchdog is meant to trigger.
+- **EKF health gate** — `wait_until_ready()` now also validates EKF AHRS health (`SYS_STATUS` bit 5), not just position freshness.
+- **`send_command_long()`** — exposes the COMMAND_ACK Future API: it awaits the terminal ACK keyed by `(cmd_id, target_sys, target_comp)`. `IN_PROGRESS` extends the deadline; a duplicate in-flight command, a timeout, or a non-`ACCEPTED` result each raise `DroneError`.
+- **`get_yaw_deg()`** is normalized to `[-180, 180]`.
+
 ---
 
 ## API reference
