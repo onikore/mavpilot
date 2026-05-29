@@ -1,12 +1,18 @@
-"""MAVLinkConnection — owns the pymavlink connection, the I/O lock, and the
+"""MAVLinkConnection — owns the pymavlink connection, the write lock, and the
 heartbeat / receiver threads.
 
 Public methods:
   * connect(timeout_s, baud) → discovers target_system/target_component
-  * send(method_name, *args, **kwargs) — invokes self.mav.mav.<method_name>(...) under lock
-  * recv(blocking, timeout) — calls self.mav.recv_match(...) under lock
+  * send(method_name, *args, **kwargs) — self.mav.mav.<method_name>(...) under the write lock
+  * recv(blocking, timeout) — self.mav.recv_match(...) WITHOUT the lock (sole reader)
   * start_heartbeat()/start_receiver(handle_message)
   * close()
+
+Concurrency model: ``self._lock`` serializes *sends* only (streamer @50 Hz,
+heartbeat @1 Hz, asyncio command sends). Reads happen exclusively on the
+receiver thread and are lock-free — holding the lock across a blocking recv
+would stall the setpoint stream. Concurrent read+write on a single socket fd
+is OS-safe; sends never wait on an in-progress read.
 """
 
 from __future__ import annotations
@@ -25,11 +31,14 @@ logger = logging.getLogger("drone")
 
 
 class MAVLinkConnection:
-    """Wraps a pymavlink mavfile with thread-safe send/recv and lifecycle.
+    """Wraps a pymavlink mavfile with thread-safe sends and lifecycle.
 
-    All MAVLink I/O — sends from any thread, receives from the receiver thread,
-    sends from asyncio handlers — funnels through `self._lock`. Receiver uses
-    a 50 ms blocking recv so streamer starvation is bounded.
+    Sends from any thread (streamer, heartbeat, asyncio handlers) are serialized
+    by ``self._lock``. Receives run only on the receiver thread and are
+    lock-free: the receiver is the sole reader, so reads never race each other,
+    and they must not take the send lock (a blocking recv would otherwise stall
+    the 50 ms setpoint stream). The receiver uses a 50 ms blocking recv so its
+    own poll latency stays bounded.
     """
 
     RECV_TIMEOUT_S = 0.05
@@ -158,10 +167,14 @@ class MAVLinkConnection:
             method(*args, **kwargs)
 
     def recv(self, blocking: bool = True, timeout: float = RECV_TIMEOUT_S) -> Any | None:
+        """Read one message. Lock-free by design — see the class docstring.
+
+        Only the receiver thread calls this, so reads never race; the send lock
+        is deliberately NOT taken, so a blocking read can never stall a send.
+        """
         if self.mav is None:
             return None
-        with self._lock:
-            return self.mav.recv_match(blocking=blocking, timeout=timeout)
+        return self.mav.recv_match(blocking=blocking, timeout=timeout)
 
     def start_heartbeat(self) -> None:
         def loop() -> None:
