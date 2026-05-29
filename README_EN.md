@@ -278,6 +278,29 @@ asyncio event loop  <-- your mission code
 
 All shared state is protected by `_tel_lock` and `_setpoint_lock`. No asyncio primitives are needed in user mission code — the asyncio loop and background threads only touch shared dicts through these locks.
 
+### Module layout (v0.2.0)
+
+```
+mavpilot/
+├── controller.py          # DroneController facade (composition root)
+├── _connection.py         # MAVLinkConnection — pymavlink + I/O lock + heartbeat/receiver
+├── _telemetry.py          # Telemetry — incoming-message parsing + state cache
+├── _commands.py           # CommandSender — COMMAND_LONG with asyncio.Future ACK routing
+├── _streamer.py           # OffboardStreamer — setpoint thread + telemetry watchdog
+├── _mission.py            # MissionOps — takeoff/goto/hover/land/rtl/emergency_land
+├── _precision_land.py     # PrecisionLand — vision descent with altitude floor
+├── _safety.py             # SafetyOps — wait_until_ready
+├── _mock.py               # MockMavConnection + in-process simulator
+├── errors.py              # DroneError
+├── types.py               # Position, MarkerObservation, PrecisionLand{Status,Result}
+├── utils.py               # coordinate transforms, pinhole, yaw normalization
+├── constants.py           # PX4 mode bits, MAV_CMD ids, type_masks
+├── cli.py                 # argparse entrypoint
+└── viz.py                 # browser UI server (HTTP + SSE)
+```
+
+Every MAVLink send and recv goes through `MAVLinkConnection`, which holds the single threading lock. Each subsystem receives its dependencies via constructor injection — easy to mock in tests.
+
 ---
 
 ## Connecting to real hardware

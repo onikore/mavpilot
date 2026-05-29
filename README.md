@@ -278,6 +278,29 @@ asyncio event loop  <-- ваш код миссии
 
 Всё общее состояние защищено `_tel_lock` и `_setpoint_lock`. В коде миссии asyncio-примитивы не нужны.
 
+### Структура модулей (v0.2.0)
+
+```
+mavpilot/
+├── controller.py          # Фасад DroneController (корень композиции)
+├── _connection.py         # MAVLinkConnection — pymavlink + лок I/O + heartbeat/receiver
+├── _telemetry.py          # Telemetry — разбор входящих сообщений + кэш состояния
+├── _commands.py           # CommandSender — COMMAND_LONG с маршрутизацией ACK через Future
+├── _streamer.py           # OffboardStreamer — поток сетпоинтов + watchdog телеметрии
+├── _mission.py            # MissionOps — takeoff/goto/hover/land/rtl/emergency_land
+├── _precision_land.py     # PrecisionLand — визуальный спуск с нижним порогом высоты
+├── _safety.py             # SafetyOps — wait_until_ready
+├── _mock.py               # MockMavConnection + встроенный симулятор
+├── errors.py              # DroneError
+├── types.py               # Position, MarkerObservation, PrecisionLand{Status,Result}
+├── utils.py               # преобразования координат, pinhole, нормализация курса
+├── constants.py           # биты режимов PX4, id MAV_CMD, type_mask
+├── cli.py                 # точка входа argparse
+└── viz.py                 # сервер браузерного UI (HTTP + SSE)
+```
+
+Каждый MAVLink send и recv проходит через `MAVLinkConnection`, владеющий единственным локом. Каждый подкомпонент получает зависимости через конструктор — легко мокать в тестах.
+
 ---
 
 ## Подключение к реальному железу
