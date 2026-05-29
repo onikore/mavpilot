@@ -9,6 +9,21 @@
 [![Python](https://img.shields.io/pypi/pyversions/mavpilot)](https://pypi.org/project/mavpilot/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+## Contents
+
+- [Features](#features)
+- [Installation](#installation)
+- [Quick start — mock mode](#quick-start--mock-mode)
+- [Library usage](#library-usage)
+- [CLI reference](#cli-reference)
+- [API reference](#api-reference)
+- [Coordinate system](#coordinate-system)
+- [Visualization](#visualization)
+- [Architecture](#architecture)
+- [Connecting to real hardware](#connecting-to-real-hardware)
+- [Development](#development)
+- [License](#license)
+
 ---
 
 ## Features
