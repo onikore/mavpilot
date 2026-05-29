@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.2 — 2026-05-29
+
+### Docs
+- English `README.md` is now the primary readme; the Russian translation moved
+  to `README.ru.md` (language switcher links updated both ways).
+- Auto-generated API documentation via [pdoc](https://pdoc.dev/), built from
+  the source docstrings — `scripts/build_docs.sh` locally, and a new `Docs`
+  GitHub Actions workflow that deploys to GitHub Pages on `main` and `v*` tags.
+- A real `docs/` folder is now tracked (only `docs/superpowers/` planning notes
+  and the generated `docs/api/` output stay git-ignored).
+
 ## 0.2.1 — 2026-05-29
 
 ### Internal

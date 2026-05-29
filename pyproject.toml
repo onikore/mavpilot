@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mavpilot"
-version = "0.2.1"
+version = "0.2.2"
 description = "Async PX4 drone controller — sequential autonomous flight via MAVLink"
 readme = "README.md"
 license = { text = "MIT" }
@@ -43,6 +43,7 @@ dev = [
     "black>=24.0",
     "mypy>=1.7",
     "ruff>=0.4",
+    "pdoc>=14",
 ]
 
 [tool.setuptools.packages.find]
