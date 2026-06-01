@@ -406,3 +406,16 @@ class CommandSender:
                 0,
             )
             await asyncio.sleep(0.05)
+
+        # Fallback for stacks that ignore SET_MESSAGE_INTERVAL: the legacy
+        # REQUEST_DATA_STREAM (deprecated but still honoured by older PX4 /
+        # ArduPilot). MAV_DATA_STREAM_ALL at a modest rate; start_stop=1.
+        with contextlib.suppress(Exception):
+            self._connection.send(
+                "request_data_stream_send",
+                tgt_sys,
+                tgt_comp,
+                mavutil.mavlink.MAV_DATA_STREAM_ALL,
+                10,
+                1,
+            )

@@ -40,4 +40,16 @@ class SafetyOps:
                 logger.info("EKF ready")
                 return
             await asyncio.sleep(0.5)
-        raise DroneError(f"EKF readiness timeout (pos_ok={pos_ok}, ekf_healthy={ekf_ok})")
+
+        reasons = []
+        if not pos_ok:
+            reasons.append(
+                "no fresh LOCAL_POSITION_NED (no GPS/EKF position fix, or the "
+                "position stream isn't arriving — check the data-stream request)"
+            )
+        if not ekf_ok:
+            reasons.append(
+                "SYS_STATUS AHRS health bit is not set (the EKF/attitude "
+                "estimator has not converged)"
+            )
+        raise DroneError(f"EKF readiness timeout after {timeout_s}s: " + "; ".join(reasons) + ".")
