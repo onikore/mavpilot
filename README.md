@@ -151,6 +151,23 @@ dx, dy = pixel_to_body_offset(
 )
 ```
 
+### Live telemetry
+
+Subscribe to ~10 Hz telemetry snapshots (works even with `enable_viz=False`):
+
+```python
+async with DroneController(mock=True, enable_viz=False) as drone:
+    # Callback style — returns an unsubscribe function:
+    unsubscribe = drone.subscribe(lambda t: print(t["x"], t["y"], t["z"]))
+    ...
+    unsubscribe()
+
+    # Or async-iterator style:
+    async for t in drone.telemetry_stream():
+        if t["landed"] == 1:
+            break
+```
+
 ---
 
 ## CLI reference
@@ -167,6 +184,10 @@ Options:
   --no-viz              Disable browser visualization
   --precision-land      Use precision landing with a simulated marker
   --pattern {square,star}  Demo flight pattern  [default: square]
+  --log-level {DEBUG,INFO,WARNING,ERROR}  Logging verbosity  [default: INFO]
+  --loop-hz FLOAT       OFFBOARD setpoint publish rate in Hz  [default: 50.0]
+  --watchdog-s FLOAT    Telemetry watchdog timeout in seconds  [default: 2.0]
+  --version             Print the mavpilot version and exit
 ```
 
 ### Error handling and Ctrl-C
@@ -186,18 +207,24 @@ Options:
 
 ## API reference
 
+> The full, always-current reference is generated from docstrings and published
+> at **[the GitHub Pages docs site](https://onikore.github.io/mavpilot/)** — treat
+> that as the source of truth. The tables below are a quick map.
+
 ### `DroneController(…)`
 
 ```python
 DroneController(
-    connection_string = "udp:127.0.0.1:14540",
-    source_system     = 255,
-    source_component  = MAV_COMP_ID_MISSIONPLANNER,
-    loop_hz           = 50.0,       # setpoint publish rate
-    enable_viz        = True,       # start browser viz server
-    viz_port          = 8765,
-    mock              = False,      # no-hardware simulator
-    yaw_slew_rate_deg = 15.0,       # max yaw rate (deg/s)
+    connection_string    = "udp:127.0.0.1:14540",
+    source_system        = 255,
+    source_component     = MAV_COMP_ID_MISSIONPLANNER,
+    loop_hz              = 50.0,       # setpoint publish rate
+    enable_viz           = True,       # start browser viz server
+    viz_port             = 8765,
+    viz_host             = "127.0.0.1", # 0.0.0.0 to expose on LAN
+    mock                 = False,      # no-hardware simulator
+    yaw_slew_rate_deg    = 15.0,       # max yaw rate (deg/s)
+    telemetry_watchdog_s = 2.0,        # LOCAL_POSITION_NED silence → watchdog
 )
 ```
 
@@ -206,7 +233,8 @@ DroneController(
 | Method | Description |
 |---|---|
 | `await connect(timeout_s)` | Open MAVLink and start background threads |
-| `await apply_safe_params()` | Write recommended PX4 safety params |
+| `await reconnect(timeout_s)` | Re-open the link after loss; clears watchdog/send-fault latches (re-arm + re-enter OFFBOARD after) |
+| `await apply_safe_params()` | Write recommended PX4 safety params, **verified via `PARAM_VALUE` read-back** |
 | `await wait_until_ready(timeout_s)` | Block until EKF reports LOCAL_POSITION_NED |
 | `await takeoff(altitude_m, timeout_s)` | Arm, enter OFFBOARD, climb |
 | `await goto(x, y, z, yaw_deg, …)` | Fly to NED position |
@@ -228,8 +256,12 @@ DroneController(
 | `get_local_position()` | `Position(x, y, z)` in NED meters |
 | `get_yaw_rad()` / `get_yaw_deg()` | Current heading |
 | `is_armed()` | `bool` |
+| `ever_armed()` | `bool` — sticky; armed at any point this session |
 | `is_offboard()` | `bool` |
 | `landed_state()` | `int` (1 = on ground, 2 = in air) |
+| `link_alive()` | `bool` — neither watchdog nor send-fault latched |
+| `subscribe(cb)` | Register a ~10 Hz telemetry callback; returns an unsubscribe fn |
+| `telemetry_stream()` | `async for` telemetry snapshots (works with viz disabled) |
 
 ### Data classes
 

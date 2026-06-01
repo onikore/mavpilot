@@ -151,6 +151,23 @@ dx, dy = pixel_to_body_offset(
 )
 ```
 
+### Живая телеметрия
+
+Подписка на снимки телеметрии ~10 Гц (работает и при `enable_viz=False`):
+
+```python
+async with DroneController(mock=True, enable_viz=False) as drone:
+    # Через колбэк — возвращает функцию отписки:
+    unsubscribe = drone.subscribe(lambda t: print(t["x"], t["y"], t["z"]))
+    ...
+    unsubscribe()
+
+    # Или через async-итератор:
+    async for t in drone.telemetry_stream():
+        if t["landed"] == 1:
+            break
+```
+
 ---
 
 ## CLI
@@ -167,6 +184,10 @@ python -m mavpilot [ОПЦИИ]
   --no-viz              Отключить браузерную визуализацию
   --precision-land      Точная посадка с симулированным маркером
   --pattern {square,star}  Паттерн полёта в демо  [по умолчанию: square]
+  --log-level {DEBUG,INFO,WARNING,ERROR}  Уровень логирования  [по умолчанию: INFO]
+  --loop-hz FLOAT       Частота стриминга сетпоинтов OFFBOARD, Гц  [по умолчанию: 50.0]
+  --watchdog-s FLOAT    Таймаут watchdog телеметрии, с  [по умолчанию: 2.0]
+  --version             Вывести версию mavpilot и выйти
 ```
 
 ### Поведение при ошибках и Ctrl-C
@@ -186,18 +207,24 @@ python -m mavpilot [ОПЦИИ]
 
 ## Справочник API
 
+> Полный и всегда актуальный справочник генерируется из docstring и
+> публикуется на **[сайте документации GitHub Pages](https://onikore.github.io/mavpilot/)**
+> — это источник истины. Таблицы ниже — быстрая карта.
+
 ### `DroneController(…)`
 
 ```python
 DroneController(
-    connection_string = "udp:127.0.0.1:14540",
-    source_system     = 255,
-    source_component  = MAV_COMP_ID_MISSIONPLANNER,
-    loop_hz           = 50.0,       # частота стриминга сетпоинтов
-    enable_viz        = True,       # запустить браузерную визуализацию
-    viz_port          = 8765,
-    mock              = False,      # симулятор без железа
-    yaw_slew_rate_deg = 15.0,       # макс. скорость рыскания (°/с)
+    connection_string    = "udp:127.0.0.1:14540",
+    source_system        = 255,
+    source_component     = MAV_COMP_ID_MISSIONPLANNER,
+    loop_hz              = 50.0,       # частота стриминга сетпоинтов
+    enable_viz           = True,       # запустить браузерную визуализацию
+    viz_port             = 8765,
+    viz_host             = "127.0.0.1", # 0.0.0.0 — доступ из локальной сети
+    mock                 = False,      # симулятор без железа
+    yaw_slew_rate_deg    = 15.0,       # макс. скорость рыскания (°/с)
+    telemetry_watchdog_s = 2.0,        # тишина LOCAL_POSITION_NED → watchdog
 )
 ```
 
@@ -206,7 +233,8 @@ DroneController(
 | Метод | Описание |
 |---|---|
 | `await connect(timeout_s)` | Открыть MAVLink и запустить фоновые потоки |
-| `await apply_safe_params()` | Записать рекомендуемые параметры безопасности PX4 |
+| `await reconnect(timeout_s)` | Переподключиться после потери связи; сбрасывает флаги watchdog/send-fault (после — заново арм и OFFBOARD) |
+| `await apply_safe_params()` | Записать рекомендуемые параметры безопасности PX4, **с проверкой через чтение `PARAM_VALUE`** |
 | `await wait_until_ready(timeout_s)` | Ждать пока EKF не выдаст LOCAL_POSITION_NED |
 | `await takeoff(altitude_m, timeout_s)` | Арм, OFFBOARD режим, набор высоты |
 | `await goto(x, y, z, yaw_deg, …)` | Лететь в точку NED |
@@ -228,8 +256,12 @@ DroneController(
 | `get_local_position()` | `Position(x, y, z)` в метрах NED |
 | `get_yaw_rad()` / `get_yaw_deg()` | Текущий курс |
 | `is_armed()` | `bool` |
+| `ever_armed()` | `bool` — sticky; был ли арм хоть раз за сессию |
 | `is_offboard()` | `bool` |
 | `landed_state()` | `int` (1 = на земле, 2 = в воздухе) |
+| `link_alive()` | `bool` — не сработали ни watchdog, ни send-fault |
+| `subscribe(cb)` | Подписка на телеметрию ~10 Гц; возвращает функцию отписки |
+| `telemetry_stream()` | `async for` по снимкам телеметрии (работает и без визуализации) |
 
 ### Датаклассы
 

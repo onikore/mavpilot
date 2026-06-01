@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.3.0 — 2026-06-01
+
+### Safety / correctness
+- **OFFBOARD setpoint starvation fixed.** The receiver thread no longer holds
+  the MAVLink I/O lock across its 50 ms blocking read; the lock now serializes
+  sends only. A blocking receive can no longer stall the 50 Hz setpoint stream
+  (which PX4 punishes by dropping OFFBOARD).
+- **`apply_safe_params()` now verifies every write.** `PARAM_SET` is
+  unacknowledged in MAVLink, so a dropped frame previously left a safety
+  parameter silently unset. Each param is now written via `set_param_checked`,
+  which reads it back (`PARAM_REQUEST_READ` → `PARAM_VALUE`), retries, and
+  raises `DroneError` if it can't confirm the value.
+- **Outbound send-fault detection.** The setpoint streamer latches a
+  `send_fault` after ~0.5 s of consecutive send failures (the outbound link is
+  down); mission methods then raise `DroneError` (`emergency_land` still
+  bypasses). Streamer warnings are rate-limited to once per second.
+- **`__aexit__` emergency-land hardened.** Telemetry tracks a sticky
+  `ever_armed` flag; the context-manager exit lands on error when
+  `is_armed()` **or** `ever_armed()`, so frozen telemetry reporting
+  `armed=False` can't silently skip the safety path.
+
+### Robustness
+- **`reconnect()`** — explicit link-loss recovery on `DroneController` and
+  `MAVLinkConnection`: reopens the link, restarts the heartbeat/receiver
+  threads, re-requests data streams, and clears the watchdog/send-fault
+  latches. No automatic mid-mission reconnection (it would race live mission
+  state); the caller must re-arm and re-enter OFFBOARD afterwards. Added a
+  `link_alive()` helper.
+- **Data-stream fallback.** `request_data_streams` also sends the legacy
+  `REQUEST_DATA_STREAM` after `SET_MESSAGE_INTERVAL`, for stacks that ignore
+  the interval command. `wait_until_ready` timeouts now name which gate failed
+  (no fresh `LOCAL_POSITION_NED` vs unset `SYS_STATUS` AHRS health).
+
+### Features
+- **Telemetry subscription API** — `subscribe(callback) -> unsubscribe` and an
+  async `telemetry_stream()` generator deliver ~10 Hz snapshots (the same data
+  the visualizer receives), working with `enable_viz=False`.
+- CLI: new `--version`, `--log-level`, `--loop-hz`, and `--watchdog-s` flags.
+
+### Internal / tooling
+- Telemetry and setpoint state are now typed via `TelemetryState` /
+  `SetpointState` `TypedDict`s (mypy checks keys/types; no call-site changes).
+- Property tests for `normalize_yaw_deg` range and `pixel_to_body_offset`
+  sign/monotonicity.
+- Dependabot for `pip` and GitHub Actions; PyPI publish now emits provenance
+  attestations.
+
 ## 0.2.3 — 2026-05-29
 
 ### Docs
