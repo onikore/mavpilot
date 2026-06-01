@@ -14,7 +14,7 @@ import math
 import threading
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from pymavlink import mavutil
 
@@ -28,11 +28,36 @@ if TYPE_CHECKING:
 logger = logging.getLogger("drone")
 
 
+class TelemetryState(TypedDict):
+    """Shape of the shared telemetry cache (guarded by ``Telemetry._lock``)."""
+
+    armed: bool
+    ever_armed: bool
+    custom_mode: int
+    main_mode: int
+    sub_mode: int
+    local_x: float
+    local_y: float
+    local_z: float
+    vx: float
+    vy: float
+    vz: float
+    yaw: float
+    roll: float
+    pitch: float
+    battery_remaining: float
+    landed_state: int
+    ekf_healthy: bool
+    local_position_ok: bool
+    last_local_pos_ts: float
+    last_ack: tuple[int, int] | None
+
+
 class Telemetry:
     def __init__(self, connection) -> None:
         self._connection = connection
         self._lock = threading.Lock()
-        self._tel: dict = {
+        self._tel: TelemetryState = {
             "armed": False,
             "ever_armed": False,
             "custom_mode": 0,

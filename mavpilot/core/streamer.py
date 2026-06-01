@@ -13,6 +13,7 @@ import logging
 import math
 import threading
 import time
+from typing import TypedDict
 
 from pymavlink import mavutil
 
@@ -20,6 +21,20 @@ from ..constants import DEFAULT_POS_TYPE_MASK
 from ..errors import DroneError
 
 logger = logging.getLogger("drone")
+
+
+class SetpointState(TypedDict):
+    """Shape of the OFFBOARD setpoint dict (guarded by ``_setpoint_lock``)."""
+
+    x: float
+    y: float
+    z: float
+    vx: float
+    vy: float
+    vz: float
+    yaw: float
+    yaw_target: float
+    type_mask: int
 
 
 class OffboardStreamer:
@@ -44,7 +59,7 @@ class OffboardStreamer:
         self._proc_start_monotonic = proc_start_monotonic
 
         self._setpoint_lock = threading.Lock()
-        self._setpoint = {
+        self._setpoint: SetpointState = {
             "x": 0.0,
             "y": 0.0,
             "z": 0.0,

@@ -13,6 +13,7 @@ import math
 import threading
 import time
 from collections.abc import Callable
+from typing import Any, cast
 
 from pymavlink import mavutil
 
@@ -188,16 +189,18 @@ class DroneController:
         return self._commands._pending_acks_lock
 
     @property
-    def _tel(self) -> dict:
-        return self._telemetry._tel
+    def _tel(self) -> dict[str, Any]:
+        # Compatibility shim: the live state is a TelemetryState TypedDict, but
+        # call sites/tests treat it as a loose dict. Cast keeps them untyped.
+        return cast("dict[str, Any]", self._telemetry._tel)
 
     @property
     def _tel_lock(self) -> threading.Lock:
         return self._telemetry._lock
 
     @property
-    def _setpoint(self) -> dict:
-        return self._streamer._setpoint
+    def _setpoint(self) -> dict[str, Any]:
+        return cast("dict[str, Any]", self._streamer._setpoint)
 
     @property
     def _setpoint_lock(self) -> threading.Lock:
