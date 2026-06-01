@@ -12,7 +12,7 @@ import logging
 import math
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from typing import Any, cast
 
 from pymavlink import mavutil
@@ -147,6 +147,8 @@ class DroneController:
         self._telemetry.route_ack = self._commands.route_command_ack
         self._telemetry.route_param = self._commands.route_param_value
         self._viz_publisher_task_handle: asyncio.Task | None = None
+        # Telemetry-subscription callbacks, fed by the publisher loop (~10 Hz).
+        self._subscribers: list[Callable[[dict[str, Any]], None]] = []
 
         self._shutdown_requested = False
         self.yaw_slew_rate_rad = math.radians(yaw_slew_rate_deg)
@@ -829,41 +831,108 @@ class DroneController:
         evt.update(payload)
         self._viz.publish(evt)
 
+    def _telemetry_snapshot(self) -> dict[str, Any]:
+        """Build the ~10 Hz telemetry snapshot sent to viz and subscribers."""
+        with self._tel_lock:
+            t = dict(self._tel)
+        with self._setpoint_lock:
+            sp = dict(self._setpoint)
+        return {
+            "type": "telemetry",
+            "x": t["local_x"],
+            "y": t["local_y"],
+            "z": t["local_z"],
+            "vx": t["vx"],
+            "vy": t["vy"],
+            "vz": t["vz"],
+            "yaw": t["yaw"],
+            "roll": t["roll"],
+            "pitch": t["pitch"],
+            "armed": t["armed"],
+            "main_mode": t["main_mode"],
+            "sub_mode": t["sub_mode"],
+            "battery": t["battery_remaining"],
+            "landed": t["landed_state"],
+            "streaming": self._streaming,
+            "setpoint": {
+                "x": sp["x"],
+                "y": sp["y"],
+                "z": sp["z"],
+                "yaw": (None if math.isnan(sp["yaw"]) else sp["yaw"]),
+            },
+            "ts": time.time(),
+        }
+
+    def subscribe(self, callback: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
+        """Register a callback to receive telemetry snapshots (~10 Hz).
+
+        The callback gets the same dict the visualizer receives (keys: ``x``/
+        ``y``/``z``, ``vx``/``vy``/``vz``, ``yaw``/``roll``/``pitch``,
+        ``armed``, ``main_mode``, ``battery``, ``landed``, ``setpoint``,
+        ``ts``). It runs on the asyncio event loop, so keep it non-blocking.
+
+        Works with ``enable_viz=False`` — the publisher loop starts lazily on
+        the first subscriber. Must be called within the running event loop
+        (i.e. after :meth:`connect`).
+
+        Returns:
+            A function that unsubscribes the callback when called.
+        """
+        self._subscribers.append(callback)
+        self._ensure_publisher_started()
+
+        def _unsubscribe() -> None:
+            with contextlib.suppress(ValueError):
+                self._subscribers.remove(callback)
+
+        return _unsubscribe
+
+    async def telemetry_stream(self) -> AsyncIterator[dict[str, Any]]:
+        """Yield telemetry snapshots as they are published (~10 Hz).
+
+        Example::
+
+            async for t in drone.telemetry_stream():
+                print(t["x"], t["y"], t["z"])
+
+        Breaking out of the loop (or cancellation) unsubscribes automatically.
+        The backing queue keeps only the most recent snapshots, so a slow
+        consumer drops old data rather than growing without bound.
+        """
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=10)
+
+        def _cb(snap: dict[str, Any]) -> None:
+            try:
+                queue.put_nowait(snap)
+            except asyncio.QueueFull:
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    queue.get_nowait()
+                with contextlib.suppress(asyncio.QueueFull):
+                    queue.put_nowait(snap)
+
+        unsubscribe = self.subscribe(_cb)
+        try:
+            while not self._shutdown_requested:
+                yield await queue.get()
+        finally:
+            unsubscribe()
+
+    def _ensure_publisher_started(self) -> None:
+        if self._viz_publisher_task_handle is None or self._viz_publisher_task_handle.done():
+            self._viz_publisher_task_handle = asyncio.create_task(self._viz_publisher_loop())
+
     async def _viz_publisher_loop(self):
         try:
             while not self._shutdown_requested:
-                if self._viz is not None:
-                    with self._tel_lock:
-                        t = dict(self._tel)
-                    with self._setpoint_lock:
-                        sp = dict(self._setpoint)
-                    self._viz.publish(
-                        {
-                            "type": "telemetry",
-                            "x": t["local_x"],
-                            "y": t["local_y"],
-                            "z": t["local_z"],
-                            "vx": t["vx"],
-                            "vy": t["vy"],
-                            "vz": t["vz"],
-                            "yaw": t["yaw"],
-                            "roll": t["roll"],
-                            "pitch": t["pitch"],
-                            "armed": t["armed"],
-                            "main_mode": t["main_mode"],
-                            "sub_mode": t["sub_mode"],
-                            "battery": t["battery_remaining"],
-                            "landed": t["landed_state"],
-                            "streaming": self._streaming,
-                            "setpoint": {
-                                "x": sp["x"],
-                                "y": sp["y"],
-                                "z": sp["z"],
-                                "yaw": (None if math.isnan(sp["yaw"]) else sp["yaw"]),
-                            },
-                            "ts": time.time(),
-                        }
-                    )
+                if self._viz is not None or self._subscribers:
+                    snap = self._telemetry_snapshot()
+                    if self._viz is not None:
+                        self._viz.publish(snap)
+                    for cb in list(self._subscribers):
+                        try:
+                            cb(snap)
+                        except Exception as e:
+                            logger.warning(f"telemetry subscriber raised: {e}")
                 await asyncio.sleep(0.1)
         except asyncio.CancelledError:
             pass
