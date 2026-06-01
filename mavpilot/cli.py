@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable
 
 from pymavlink import mavutil
 
+from . import __version__
 from .controller import DroneController
 from .types import MarkerObservation
 from .utils import ned_to_body
@@ -73,6 +74,11 @@ def _build_argparser() -> argparse.ArgumentParser:
         description="mavpilot — PX4 autonomous drone controller with browser visualization."
     )
     parser.add_argument(
+        "--version",
+        action="version",
+        version=f"mavpilot {__version__}",
+    )
+    parser.add_argument(
         "--connection",
         default="udp:127.0.0.1:14540",
         help="MAVLink endpoint (default: udp:127.0.0.1:14540 for SITL)",
@@ -102,6 +108,24 @@ def _build_argparser() -> argparse.ArgumentParser:
         choices=["square", "star"],
         default="square",
         help="Demo flight pattern: square or star (default: square)",
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="INFO",
+        help="Logging verbosity (default: INFO)",
+    )
+    parser.add_argument(
+        "--loop-hz",
+        type=float,
+        default=50.0,
+        help="OFFBOARD setpoint publish rate in Hz (default: 50.0)",
+    )
+    parser.add_argument(
+        "--watchdog-s",
+        type=float,
+        default=2.0,
+        help="Telemetry watchdog timeout in seconds (default: 2.0)",
     )
     return parser
 
@@ -181,18 +205,19 @@ async def main() -> None:
     args = _build_argparser().parse_args()
 
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, args.log_level),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
     drone = DroneController(
         connection_string=args.connection,
         source_component=mavutil.mavlink.MAV_COMP_ID_MISSIONPLANNER,
-        loop_hz=50.0,
+        loop_hz=args.loop_hz,
         enable_viz=not args.no_viz,
         viz_port=args.viz_port,
         viz_host=args.viz_host,
         mock=args.mock,
+        telemetry_watchdog_s=args.watchdog_s,
     )
 
     _install_signal_handlers(asyncio.get_running_loop(), drone)
