@@ -211,6 +211,28 @@ class MAVLinkConnection:
         self._receiver_thread = threading.Thread(target=loop, daemon=True, name="recv")
         self._receiver_thread.start()
 
+    async def reconnect(self, timeout_s: float = 30.0, baud: int = 57600) -> None:
+        """Tear down the link and re-open it. Does NOT restart the threads.
+
+        Stops the heartbeat/receiver threads and closes the socket, then resets
+        the stop event and re-runs :meth:`connect`. The caller is responsible
+        for restarting the heartbeat/receiver (the receiver needs the message
+        handler) — :meth:`DroneController.reconnect` does this.
+        """
+        self._stop_event.set()
+        for thr in (self._heartbeat_thread, self._receiver_thread):
+            if thr is not None and thr.is_alive():
+                thr.join(timeout=2.0)
+        self._heartbeat_thread = None
+        self._receiver_thread = None
+        if self.mav is not None:
+            with contextlib.suppress(Exception):
+                self.mav.close()
+            self.mav = None
+        # Fresh stop event so newly started threads aren't pre-signalled.
+        self._stop_event = threading.Event()
+        await self.connect(timeout_s=timeout_s, baud=baud)
+
     def close(self) -> None:
         self._stop_event.set()
         for thr in (self._heartbeat_thread, self._receiver_thread):

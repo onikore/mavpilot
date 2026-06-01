@@ -318,6 +318,40 @@ class DroneController:
                 self._viz = None
                 self._telemetry.viz = None
 
+    async def reconnect(self, timeout_s: float = 30.0) -> None:
+        """Tear down and re-establish the MAVLink link (explicit recovery).
+
+        Reopens the connection, restarts the heartbeat/receiver threads,
+        re-requests the data streams, and clears the telemetry-watchdog and
+        send-fault latches. **Does not restore flight state** — after a
+        reconnect the caller must re-arm and re-enter OFFBOARD before issuing
+        setpoints. There is no automatic mid-mission reconnection: that would
+        race live mission state, so recovery is left to the caller.
+
+        Args:
+            timeout_s: Seconds to wait for the heartbeat on the new link.
+
+        Raises:
+            DroneError: If the link cannot be re-established within ``timeout_s``.
+        """
+        logger.info("Reconnecting MAVLink link...")
+        try:
+            await self._connection.reconnect(timeout_s=timeout_s)
+        except RuntimeError as e:
+            raise DroneError(str(e)) from e
+        if not self._mock:
+            self._connection.start_heartbeat()
+            self._connection.start_receiver(self._handle_message)
+            await self._request_data_streams()
+        self._watchdog_tripped = False
+        self._send_fault_tripped = False
+        logger.info("Reconnect complete — re-arm and re-enter OFFBOARD before flying")
+
+    def link_alive(self) -> bool:
+        """Return ``True`` while the link is healthy — neither the telemetry
+        watchdog nor the outbound send-fault latch is set."""
+        return not self._watchdog_tripped and not self._send_fault_tripped
+
     def close(self):
         """Synchronous shutdown. Prefer ``await aclose()`` or
         ``async with DroneController(...)``; this remains for back-compat."""

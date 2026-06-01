@@ -40,6 +40,9 @@ class MockMavConnection:
     async def connect(self, timeout_s: float = 30.0, baud: int = 57600) -> None:
         return None
 
+    async def reconnect(self, timeout_s: float = 30.0, baud: int = 57600) -> None:
+        return None
+
     def send(self, method_name: str, *args, **kwargs) -> None:
         return None
 
