@@ -67,6 +67,27 @@ class TestPixelToBodyOffset:
         assert dx == pytest.approx(5.0, abs=0.01)
         assert dy == pytest.approx(0.0, abs=1e-9)
 
+    @given(
+        px=st.floats(min_value=0.01, max_value=1.0),
+        alt=st.floats(min_value=0.1, max_value=100.0),
+        fov=st.floats(min_value=10.0, max_value=170.0),
+    )
+    def test_positive_x_pixel_is_positive_and_monotonic_y_offset(self, px, alt, fov):
+        # +x image pixel → +y (right) body offset, growing with the pixel offset.
+        _, dy_full = pixel_to_body_offset(px, 0.0, fov, fov, alt)
+        _, dy_half = pixel_to_body_offset(px / 2, 0.0, fov, fov, alt)
+        assert dy_full > 0
+        assert dy_full > dy_half
+
+    @given(
+        py=st.floats(min_value=0.01, max_value=1.0),
+        alt=st.floats(min_value=0.1, max_value=100.0),
+        fov=st.floats(min_value=10.0, max_value=170.0),
+    )
+    def test_positive_y_pixel_maps_to_negative_body_x(self, py, alt, fov):
+        dx, _ = pixel_to_body_offset(0.0, py, fov, fov, alt)
+        assert dx < 0
+
 
 class TestBodyNedRoundtrip:
     @given(
@@ -115,3 +136,10 @@ class TestNormalizeYawDeg:
     def test_below_neg180_wraps(self):
         assert normalize_yaw_deg(-181.0) == pytest.approx(179.0)
         assert normalize_yaw_deg(-360.0) == pytest.approx(0.0)
+
+    @given(st.floats(min_value=-1e6, max_value=1e6, allow_nan=False, allow_infinity=False))
+    def test_output_always_within_180(self, deg):
+        # Magnitude never exceeds 180 for any input (the boundary 180 is a valid
+        # output — the existing suite maps 540 -> 180.0, semantically == -180).
+        y = normalize_yaw_deg(deg)
+        assert -180.0 <= y <= 180.0
