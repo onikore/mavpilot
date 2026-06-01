@@ -3,7 +3,6 @@ name: Docs
 on:
   push:
     branches: ["main"]
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -38,8 +37,10 @@ jobs:
 
   deploy:
     name: Deploy to GitHub Pages
-    # Publish only from main and version tags, not every branch build.
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    # Publish only from main (the github-pages environment restricts
+    # deployments to main, so tag refs would fail the deploy). main is always
+    # pushed alongside a release tag, so the docs stay current either way.
+    if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     environment:
