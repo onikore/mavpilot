@@ -25,8 +25,7 @@ class ArucoFractalSource:
             import arucofractal as _af  # noqa: F401
         except ImportError as exc:
             raise ImportError(
-                "Install arucofractal to use ArucoFractalSource "
-                "(pip install arucofractal)"
+                "Install arucofractal to use ArucoFractalSource " "(pip install arucofractal)"
             ) from exc
         self._config = config
         self._camera_yaw_deg = camera_yaw_deg
