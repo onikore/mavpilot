@@ -1,12 +1,17 @@
 """Точная посадка через Gazebo ROS2 топики с ArUco Fractal детектором.
 
-Читает кадры и параметры камеры из ROS2:
+Gazebo публикует топики в своём транспорте (gz-transport), а не в ROS2 напрямую.
+GazeboArucoSource автоматически запускает ros_gz_bridge, который пробрасывает
+gz-топики в ROS2, а затем подписывается на них.
+
+Читает кадры и параметры камеры из:
   /world/aruco/model/x500_mono_cam_down_0/link/camera_link/sensor/camera/image
   /world/aruco/model/x500_mono_cam_down_0/link/camera_link/sensor/camera/camera_info
 
 Требует:
     pip install mavpilot[aruco]
     ROS2 (humble / jazzy) + source /opt/ros/<distro>/setup.bash
+    ros-<distro>-ros-gz-bridge  (apt install ros-humble-ros-gz-bridge)
     Опционально: pip install opencv-contrib-python (для cv_bridge fallback)
 
 Запуск:
@@ -23,6 +28,7 @@ import asyncio
 import argparse
 import logging
 import math
+import subprocess
 import threading
 import time
 
@@ -36,12 +42,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("drone")
 
 IMAGE_TOPIC = (
-    "/world/aruco/model/x500_mono_cam_down_0"
-    "/link/camera_link/sensor/camera/image"
+    "/world/aruco/model/x500_mono_cam_down_0/link/camera_link/sensor/camera/image"
 )
 CAMERA_INFO_TOPIC = (
-    "/world/aruco/model/x500_mono_cam_down_0"
-    "/link/camera_link/sensor/camera/camera_info"
+    "/world/aruco/model/x500_mono_cam_down_0/link/camera_link/sensor/camera/camera_info"
 )
 
 
@@ -139,10 +143,36 @@ class GazeboArucoSource:
         self._detector = None
         self._node = None
         self._spin_thread: threading.Thread | None = None
+        self._bridge_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
+
+    def _start_gz_bridge(self) -> None:
+        """Запускает ros_gz_bridge для проброса Gazebo-топиков в ROS2.
+
+        Gazebo публикует через gz-transport, ROS2 их не видит без бриджа.
+        parameter_bridge форматирует правила как:
+            TOPIC@ROS_TYPE[GZ_TYPE   (Gazebo → ROS2, однонаправленно)
+        """
+        rules = [
+            f"{self._image_topic}@sensor_msgs/msg/Image[gz.msgs.Image",
+            f"{self._camera_info_topic}@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo",
+        ]
+        cmd = ["ros2", "run", "ros_gz_bridge", "parameter_bridge"] + rules
+        log.info(f"Запуск gz bridge: {' '.join(cmd)}")
+        self._bridge_proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # Даём бриджу время подняться и зарегистрировать топики
+        time.sleep(2.0)
+        log.info("gz bridge запущен")
 
     async def __aenter__(self) -> GazeboArucoSource:
         import rclpy  # type: ignore[import]
         from arucofractal import Config, DetectionThread  # type: ignore[import]
+
+        # Сначала поднимаем мост Gazebo → ROS2
+        await asyncio.to_thread(self._start_gz_bridge)
 
         rclpy.init()
         self._node = rclpy.create_node("mavpilot_gazebo_aruco")
@@ -192,6 +222,10 @@ class GazeboArucoSource:
             rclpy.shutdown()
         except Exception:
             pass
+        if self._bridge_proc is not None:
+            self._bridge_proc.terminate()
+            self._bridge_proc.wait(timeout=5)
+            log.info("gz bridge остановлен")
 
     def marker_callback(self) -> MarkerObservation | None:
         """Возвращает смещение маркера в теле дрона (FRD) или None."""
