@@ -162,21 +162,6 @@ class GazeboArucoSource:
         import rclpy  # type: ignore[import]
         from arucofractal import Config, DetectionThread  # type: ignore[import]
 
-        # Проверяем что aruco C-расширение доступно до запуска всего остального
-        try:
-            import importlib
-            importlib.import_module("aruco")
-        except ImportError:
-            raise ImportError(
-                "Модуль aruco (C-расширение) не установлен.\n"
-                "Установите его из исходников:\n"
-                "  cd arucofractal/third_party/python-aruco\n"
-                "  mkdir build && cd build\n"
-                "  cmake .. && make -j$(nproc)\n"
-                "  cd python && pip install .\n"
-                "Или используйте venv arucofractal где aruco уже установлен."
-            )
-
         # Сначала поднимаем мост Gazebo → ROS2
         await asyncio.to_thread(self._start_gz_bridge)
 
