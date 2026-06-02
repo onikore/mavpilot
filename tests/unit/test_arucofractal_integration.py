@@ -131,3 +131,30 @@ def test_marker_callback_zero_yaw_is_identity():
     assert obs1 is not None and obs2 is not None
     assert math.isclose(obs1.dx, obs2.dx, abs_tol=1e-9)
     assert math.isclose(obs1.dy, obs2.dy, abs_tol=1e-9)
+
+
+@pytest.mark.asyncio
+async def test_aenter_aexit_creates_and_stops_stream_and_detector(monkeypatch):
+    mock_stream = MagicMock()
+    mock_detector = MagicMock()
+    mock_detector.state = None
+
+    mock_af = MagicMock()
+    mock_af.StreamReader.return_value = mock_stream
+    mock_af.DetectionThread.return_value = mock_detector
+
+    # Patch arucofractal in sys.modules so the lazy import inside __init__ succeeds
+    monkeypatch.setitem(sys.modules, "arucofractal", mock_af)
+    monkeypatch.delitem(sys.modules, "mavpilot.integrations.arucofractal", raising=False)
+
+    from mavpilot.integrations.arucofractal import ArucoFractalSource
+
+    config = MagicMock()
+    src = ArucoFractalSource(config, camera_yaw_deg=0.0)
+
+    async with src:
+        assert src._stream is mock_stream
+        assert src._detector is mock_detector
+
+    mock_detector.stop.assert_called_once()
+    mock_stream.stop.assert_called_once()
