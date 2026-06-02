@@ -66,23 +66,14 @@ class ROS2ImageStream:
         self._frame: np.ndarray | None = None
         self._lock = threading.Lock()
 
-        # cv_bridge — предпочтительный способ конвертации
-        try:
-            from cv_bridge import CvBridge  # type: ignore[import]
-            self._bridge = CvBridge()
-        except ImportError:
-            self._bridge = None
-            log.warning("cv_bridge не найден, используется ручная конвертация")
-
+        # cv_bridge скомпилирован под NumPy 1.x и падает с NumPy 2.x (сегфолт).
+        # Используем только ручную конвертацию через numpy — надёжно и без зависимостей.
         self._sub = node.create_subscription(Image, topic, self._on_image, 1)
         log.info(f"Подписка на изображение: {topic}")
 
     def _on_image(self, msg) -> None:
         try:
-            if self._bridge is not None:
-                frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-            else:
-                frame = self._decode_manual(msg)
+            frame = self._decode_manual(msg)
             with self._lock:
                 self._frame = frame
         except Exception as e:
@@ -170,6 +161,21 @@ class GazeboArucoSource:
     async def __aenter__(self) -> GazeboArucoSource:
         import rclpy  # type: ignore[import]
         from arucofractal import Config, DetectionThread  # type: ignore[import]
+
+        # Проверяем что aruco C-расширение доступно до запуска всего остального
+        try:
+            import importlib
+            importlib.import_module("aruco")
+        except ImportError:
+            raise ImportError(
+                "Модуль aruco (C-расширение) не установлен.\n"
+                "Установите его из исходников:\n"
+                "  cd arucofractal/third_party/python-aruco\n"
+                "  mkdir build && cd build\n"
+                "  cmake .. && make -j$(nproc)\n"
+                "  cd python && pip install .\n"
+                "Или используйте venv arucofractal где aruco уже установлен."
+            )
 
         # Сначала поднимаем мост Gazebo → ROS2
         await asyncio.to_thread(self._start_gz_bridge)
