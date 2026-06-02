@@ -21,16 +21,51 @@ Integrate `arucofractal` (fractal ArUco marker detector) into `mavpilot` to prov
 ```
 mavpilot/
   integrations/
-    __init__.py
-    arucofractal.py
+    __init__.py          (exports MarkerSource protocol)
+    arucofractal.py      (ArucoFractalSource — default implementation)
 tests/
   unit/
     test_arucofractal_integration.py
 ```
 
+### Protocol: `MarkerSource`
+
+Defined in `mavpilot/integrations/__init__.py`. Any object that implements this interface can be used as a marker source for `precision_land()` — either the built-in `ArucoFractalSource` or a fully custom implementation.
+
+```python
+# mavpilot/integrations/__init__.py
+from typing import Protocol
+from mavpilot.types import MarkerObservation
+
+class MarkerSource(Protocol):
+    def marker_callback(self) -> MarkerObservation | None: ...
+```
+
+`MarkerSource` is a structural `Protocol` — no inheritance required. Any class with a `marker_callback()` method of the right signature satisfies it automatically.
+
+### Custom implementation example
+
+```python
+class MyOpenCVSource:
+    """Custom marker source using plain OpenCV ArUco (not fractal)."""
+
+    def __init__(self, camera_index: int = 0): ...
+    async def __aenter__(self): ...
+    async def __aexit__(self, *_): ...
+
+    def marker_callback(self) -> MarkerObservation | None:
+        # your detection logic here
+        ...
+
+async with MyOpenCVSource() as src:
+    result = await drone.precision_land(src.marker_callback)
+```
+
+The `__aenter__`/`__aexit__` are recommended for lifecycle management but not enforced by the Protocol.
+
 ### Class: `ArucoFractalSource`
 
-Async context manager that owns the `StreamReader` + `DetectionThread` lifecycle and exposes `marker_callback` for `precision_land()`.
+Default implementation. Async context manager that owns the `StreamReader` + `DetectionThread` lifecycle and exposes `marker_callback` for `precision_land()`.
 
 ```python
 class ArucoFractalSource:
@@ -43,6 +78,8 @@ class ArucoFractalSource:
 `arucofractal` is imported lazily inside `__init__` so the rest of mavpilot is unaffected if the package is absent.
 
 ## Usage
+
+### Default: ArucoFractalSource
 
 ```python
 from arucofractal import Config as ArucoConfig
@@ -61,6 +98,22 @@ async with ArucoFractalSource(aruco_cfg, camera_yaw_deg=0.0) as src:
         await drone.takeoff(altitude_m=5.0)
         result = await drone.precision_land(src.marker_callback)
         print(result.status)
+```
+
+### Custom implementation
+
+```python
+from mavpilot import DroneController
+from mavpilot.types import MarkerObservation
+
+class MyCustomSource:
+    def marker_callback(self) -> MarkerObservation | None:
+        # your detection logic — return None if marker not visible
+        ...
+
+src = MyCustomSource()
+async with DroneController(...) as drone:
+    result = await drone.precision_land(src.marker_callback)
 ```
 
 ## Data flow
@@ -129,3 +182,4 @@ All tests use a mock `DetectionThread` with a `.state` attribute — no real cam
 4. `test_marker_callback_maps_tvec` — `tvec=[0.1, 0.2, 1.5]` → `MarkerObservation(dx=0.2, dy=0.1, dz=1.5)`
 5. `test_camera_yaw_90deg` — 90° rotation produces correct rotated result
 6. `test_aenter_aexit_stops_threads` — verifies `stop()` is called on both stream and detector
+7. `test_marker_source_protocol` — verifies `MyCustomSource` satisfies `MarkerSource` Protocol via `isinstance` check
