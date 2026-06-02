@@ -138,7 +138,7 @@ For a downward-facing camera with image-top toward drone nose (`camera_yaw_deg=0
 | Camera frame | Body FRD frame | `MarkerObservation` field |
 |---|---|---|
 | `tvec[0]` (cam X / image right) | body Right (+Y) | `dy` |
-| `tvec[1]` (cam Y / image down = ahead on ground) | body Forward (+X) | `dx` |
+| `tvec[1]` (cam Y / image down = toward drone tail) | body Back (−X), so `dx = −tvec[1]` | `dx` |
 | `tvec[2]` (depth ≈ altitude) | body Down (+Z) | `dz` |
 
 For non-zero `camera_yaw_deg`, a 2D rotation is applied to `(dx, dy)`:
