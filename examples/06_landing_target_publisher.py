@@ -344,10 +344,13 @@ class LandingTargetPublisher:
         """Читает HEARTBEAT + ATTITUDE + LOCAL_POSITION_NED."""
         last_mode = None
         while self._running and self._mav:
-            msg = self._mav.recv_match(
-                type=["HEARTBEAT", "ATTITUDE", "LOCAL_POSITION_NED"],
-                blocking=True, timeout=1.0,
-            )
+            try:
+                msg = self._mav.recv_match(
+                    type=["HEARTBEAT", "ATTITUDE", "LOCAL_POSITION_NED"],
+                    blocking=True, timeout=1.0,
+                )
+            except OSError:
+                break  # соединение закрыто в __aexit__
             if msg is None:
                 continue
             t = msg.get_type()
@@ -524,7 +527,7 @@ class LandingTargetPublisher:
         #   x_ned =  dx * cos(yaw) - dy * sin(yaw)   (North)
         #   y_ned =  dx * sin(yaw) + dy * cos(yaw)   (East)
         #   z_ned =  dz                               (Down, положительный)
-        with self._yaw_lock:
+        with self._tele_lock:
             yaw = self._yaw_rad
 
         cos_y = math.cos(yaw)
