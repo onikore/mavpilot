@@ -307,7 +307,9 @@ class LandingTargetPublisher:
             self._mav.close()
 
     def _connect(self) -> mavutil.mavfile:  # type: ignore[type-arg]
-        mav = mavutil.mavlink_connection(self._conn_str)
+        # source_system=1 — companion computer (не 255/GCS).
+        # PX4 принимает LANDING_TARGET только от доверенных систем.
+        mav = mavutil.mavlink_connection(self._conn_str, source_system=1)
         mav.wait_heartbeat(timeout=30)
         log.info(
             f"PX4 подключён. system={mav.target_system} "
