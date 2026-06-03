@@ -372,71 +372,40 @@ class LandingTargetPublisher:
                     log.info(f"FC режим: {label}")
                     last_mode = label
 
-    # ------------------------------------------------------------------
-    # Фаза 1: пассивный LANDING_TARGET
-    # ------------------------------------------------------------------
-
     async def run(self, get_marker_offset) -> None:
-        """Ждёт OFFBOARD, затем переходит к активному снижению."""
+        """Единый цикл управления.
+
+        PX4 требует непрерывный поток setpoints ДО переключения в OFFBOARD.
+        Поэтому setpoints шлются сразу при старте (hold текущей позиции).
+        Как только пользователь включает OFFBOARD — скрипт начинает снижение.
+        """
         interval = 1.0 / self._rate_hz
-        sent = 0
+        last_seen = time.time()
         last_log = time.time()
+        marker_lost_timeout = 3.0
+        in_offboard = False
+        target_yaw: float | None = None
+
+        # Ждём первый LOCAL_POSITION_NED (до 5с)
+        for _ in range(50):
+            with self._tele_lock:
+                if self._ned != (0.0, 0.0, 0.0):
+                    break
+            await asyncio.sleep(0.1)
+
+        with self._tele_lock:
+            hold_x, hold_y, hold_z = self._ned
+            hold_yaw = self._yaw_rad
 
         log.info(
-            "Скрипт запущен.\n"
-            "  Фаза 1: ручной полёт — шлю LANDING_TARGET.\n"
-            "  Переключите FC в OFFBOARD → начнётся активное снижение.\n"
-            "  Ctrl+C для выхода."
+            "Скрипт запущен. Setpoints активны — можно переключать OFFBOARD.\n"
+            "  Ручной полёт: шлю hold-setpoints + LANDING_TARGET.\n"
+            "  Переключите FC в OFFBOARD → начнётся снижение по маркеру."
         )
 
         while True:
             t0 = time.time()
-
-            if self._current_mode == "OFFBOARD":
-                log.info("OFFBOARD обнаружен — начинаю активное снижение")
-                await self._offboard_descent(get_marker_offset)
-                return
-
-            obs = get_marker_offset()
-            if obs is not None and obs.dz is not None:
-                self._send_landing_target(obs)
-                sent += 1
-
-            now = time.time()
-            if now - last_log >= 5.0:
-                if obs is not None and obs.dz is not None:
-                    log.info(
-                        f"Маркер: dx={obs.dx:+.2f} dy={obs.dy:+.2f} "
-                        f"dz={obs.dz:.2f}m  lt_sent={sent}"
-                    )
-                else:
-                    log.info("Маркер не виден")
-                last_log = now
-                sent = 0
-
-            rem = interval - (time.time() - t0)
-            if rem > 0:
-                await asyncio.sleep(rem)
-
-    # ------------------------------------------------------------------
-    # Фаза 2: OFFBOARD снижение с фиксированным явом
-    # ------------------------------------------------------------------
-
-    async def _offboard_descent(self, get_marker_offset) -> None:
-        interval = 1.0 / self._rate_hz
-        last_seen = time.time()
-        marker_lost_timeout = 3.0
-
-        with self._tele_lock:
-            hold_x, hold_y, hold_z = self._ned
-            current_yaw = self._yaw_rad
-
-        # Если landing_yaw задан — используем его, иначе держим текущий яв
-        target_yaw = self._landing_yaw_rad if self._landing_yaw_rad is not None else current_yaw
-        log.info(f"OFFBOARD снижение. Целевой яв: {math.degrees(target_yaw):.1f}°")
-
-        while True:
-            t0 = time.time()
+            mode = self._current_mode
 
             with self._tele_lock:
                 pos_x, pos_y, pos_z = self._ned
@@ -444,32 +413,56 @@ class LandingTargetPublisher:
 
             obs = get_marker_offset()
 
-            if obs is not None and obs.dz is not None:
-                last_seen = time.time()
+            # ── OFFBOARD активен ───────────────────────────────────────────
+            if mode == "OFFBOARD":
+                if not in_offboard:
+                    in_offboard = True
+                    # Фиксируем целевой яв при входе в OFFBOARD
+                    target_yaw = (
+                        self._landing_yaw_rad if self._landing_yaw_rad is not None
+                        else cur_yaw
+                    )
+                    log.info(f"OFFBOARD — снижение. Яв: {math.degrees(target_yaw):.1f}°")
 
-                # Поворот смещения из body FRD в NED (используем cur_yaw для трансформа)
-                cos_y = math.cos(cur_yaw)
-                sin_y = math.sin(cur_yaw)
-                dx_ned = obs.dx * cos_y - obs.dy * sin_y
-                dy_ned = obs.dx * sin_y + obs.dy * cos_y
+                assert target_yaw is not None
 
-                step = interval * self._descent_rate
-                hold_x = pos_x + dx_ned * self._lateral_p
-                hold_y = pos_y + dy_ned * self._lateral_p
-                hold_z = pos_z + step           # NED: z↑ = вниз
+                if obs is not None and obs.dz is not None:
+                    last_seen = time.time()
+                    cos_y, sin_y = math.cos(cur_yaw), math.sin(cur_yaw)
+                    dx_ned = obs.dx * cos_y - obs.dy * sin_y
+                    dy_ned = obs.dx * sin_y + obs.dy * cos_y
+                    hold_x = pos_x + dx_ned * self._lateral_p
+                    hold_y = pos_y + dy_ned * self._lateral_p
+                    hold_z = pos_z + interval * self._descent_rate
 
-                if obs.dz < self._land_distance:
-                    log.info(f"Маркер близко dz={obs.dz:.2f}m — посадка")
-                    self._send_land_command(target_yaw)
-                    return
+                    if obs.dz < self._land_distance:
+                        log.info(f"dz={obs.dz:.2f}m < {self._land_distance}m — посадка")
+                        self._send_land_command(target_yaw)
+                        return
+                else:
+                    if time.time() - last_seen > marker_lost_timeout:
+                        log.warning("Маркер потерян — аварийная посадка")
+                        self._send_land_command(target_yaw)
+                        return
 
+                self._send_position_setpoint(hold_x, hold_y, hold_z, target_yaw)
+
+            # ── Ручной полёт: hold-setpoints + LANDING_TARGET ─────────────
             else:
-                if time.time() - last_seen > marker_lost_timeout:
-                    log.warning("Маркер потерян — аварийная посадка")
-                    self._send_land_command(target_yaw)
-                    return
+                in_offboard = False
+                hold_x, hold_y, hold_z = pos_x, pos_y, pos_z
+                hold_yaw = cur_yaw
+                # Hold-setpoints держат поток активным — PX4 примет OFFBOARD
+                self._send_position_setpoint(hold_x, hold_y, hold_z, hold_yaw)
+                if obs is not None and obs.dz is not None:
+                    self._send_landing_target(obs)
 
-            self._send_position_setpoint(hold_x, hold_y, hold_z, target_yaw)
+            # ── Лог каждые 5с ─────────────────────────────────────────────
+            now = time.time()
+            if now - last_log >= 5.0:
+                state = f"dz={obs.dz:.2f}m" if obs and obs.dz else "нет маркера"
+                log.info(f"[{mode}] {state}")
+                last_log = now
 
             rem = interval - (time.time() - t0)
             if rem > 0:
