@@ -98,6 +98,73 @@ class ROS2ImageStream:
 
 
 # ---------------------------------------------------------------------------
+# Visualization publisher — публикует кадр с наложением детекции в ROS2
+# ---------------------------------------------------------------------------
+
+class VisualizationPublisher:
+    """Публикует /mavpilot/detection_image — кадр с нарисованным маркером.
+
+    Запускается в фоновом треде, берёт свежий кадр из stream,
+    накладывает оверлей через DetectionThread.draw_overlays() и публикует
+    sensor_msgs/Image. Смотреть в RViz2 или:
+        ros2 run rqt_image_view rqt_image_view /mavpilot/detection_image
+    """
+
+    def __init__(self, node, stream: ROS2ImageStream, detector, fps: float = 10.0) -> None:
+        from sensor_msgs.msg import Image  # type: ignore[import]
+
+        self._node = node
+        self._stream = stream
+        self._detector = detector
+        self._fps = fps
+        self._running = True
+        self._pub = node.create_publisher(Image, "/mavpilot/detection_image", 1)
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        log.info("Визуализация: /mavpilot/detection_image")
+
+    def _loop(self) -> None:
+        from sensor_msgs.msg import Image  # type: ignore[import]
+
+        interval = 1.0 / self._fps
+        while self._running:
+            t0 = time.time()
+            frame = self._stream.read()
+            if frame is not None:
+                vis = frame.copy()
+                self._detector.draw_overlays(vis)
+                # Добавляем текст: дистанция до маркера и FPS детектора
+                state = self._detector.state
+                if state is not None and state.detected and state.has_pose:
+                    dz = float(state.tvec.flatten()[2])
+                    cv2.putText(
+                        vis, f"dz={dz:.2f}m  det={self._detector.det_fps:.0f}fps",
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2,
+                    )
+                else:
+                    cv2.putText(
+                        vis, "no marker", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2,
+                    )
+
+                msg = Image()
+                msg.header.stamp = self._node.get_clock().now().to_msg()
+                msg.height, msg.width = vis.shape[:2]
+                msg.encoding = "bgr8"
+                msg.step = msg.width * 3
+                msg.data = vis.tobytes()
+                self._pub.publish(msg)
+
+            elapsed = time.time() - t0
+            remaining = interval - elapsed
+            if remaining > 0:
+                time.sleep(remaining)
+
+    def stop(self) -> None:
+        self._running = False
+
+
+# ---------------------------------------------------------------------------
 # GazeboArucoSource — async context manager, реализует MarkerSource Protocol
 # ---------------------------------------------------------------------------
 
@@ -132,6 +199,7 @@ class GazeboArucoSource:
 
         self._stream: ROS2ImageStream | None = None
         self._detector = None
+        self._viz_pub: VisualizationPublisher | None = None
         self._node = None
         self._spin_thread: threading.Thread | None = None
         self._bridge_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
@@ -193,6 +261,7 @@ class GazeboArucoSource:
 
         self._stream = ROS2ImageStream(self._node, self._image_topic)
         self._detector = DetectionThread(self._stream, cfg)
+        self._viz_pub = VisualizationPublisher(self._node, self._stream, self._detector)
 
         # Запускаем spin в фоне — он обрабатывает все ROS2 колбэки
         self._spin_thread = threading.Thread(
@@ -204,6 +273,8 @@ class GazeboArucoSource:
         return self
 
     async def __aexit__(self, *_: object) -> None:
+        if self._viz_pub is not None:
+            self._viz_pub.stop()
         if self._detector is not None:
             self._detector.stop()
         if self._node is not None:
@@ -280,6 +351,74 @@ class GazeboArucoSource:
 
 
 # ---------------------------------------------------------------------------
+# Снижение по маркеру (без использования высоты дрона)
+# ---------------------------------------------------------------------------
+
+async def marker_guided_descent(
+    drone: DroneController,
+    get_marker_offset,
+    descent_rate_mps: float = 0.2,
+    lateral_p_gain: float = 0.7,
+    max_horizontal_step_m: float = 0.8,
+    land_distance_m: float = 0.5,
+    marker_lost_timeout_s: float = 3.0,
+    timeout_s: float = 120.0,
+) -> None:
+    """Снижение, управляемое только маркером.
+
+    Логика:
+    - Маркер виден → снижаемся непрерывно + корректируем горизонталь
+    - dz (расстояние до маркера) < land_distance_m → посадка
+    - Маркер потерян на > marker_lost_timeout_s → аварийная посадка
+    - Высота дрона не используется в качестве условия
+    """
+    from mavpilot.utils import body_to_ned
+
+    start = time.time()
+    last_seen = time.time()
+
+    while time.time() - start < timeout_s:
+        pos = drone.get_local_position()
+        yaw = drone.get_yaw_rad()
+        obs = get_marker_offset()
+
+        if obs is not None:
+            last_seen = time.time()
+            ned_dx, ned_dy = body_to_ned(obs.dx, obs.dy, yaw)
+
+            step_x = max(-max_horizontal_step_m,
+                         min(max_horizontal_step_m, ned_dx * lateral_p_gain))
+            step_y = max(-max_horizontal_step_m,
+                         min(max_horizontal_step_m, ned_dy * lateral_p_gain))
+
+            target_x = pos.x + step_x
+            target_y = pos.y + step_y
+            # NED: z увеличивается вниз, добавляем смещение вниз
+            target_z = pos.z + descent_rate_mps * drone.loop_period
+
+            if obs.dz is not None and obs.dz < land_distance_m:
+                log.info(f"Маркер близко dz={obs.dz:.2f}m < {land_distance_m}m — посадка")
+                await drone.land(timeout_s=30.0)
+                return
+
+            drone._set_setpoint_position(target_x, target_y, target_z, yaw)
+
+        else:
+            # Маркер не виден — удерживаем позицию
+            drone._set_setpoint_position(pos.x, pos.y, pos.z, yaw)
+            lost_for = time.time() - last_seen
+            if lost_for > marker_lost_timeout_s:
+                log.warning(f"Маркер потерян {lost_for:.1f}s — аварийная посадка")
+                await drone.land(timeout_s=30.0)
+                return
+
+        await asyncio.sleep(drone.loop_period)
+
+    log.warning("Таймаут marker_guided_descent — аварийная посадка")
+    await drone.land(timeout_s=30.0)
+
+
+# ---------------------------------------------------------------------------
 # Миссия
 # ---------------------------------------------------------------------------
 
@@ -295,22 +434,17 @@ async def mission(args) -> None:
             await drone.apply_safe_params()
             await drone.wait_until_ready(timeout_s=60.0)
 
-            await drone.takeoff(altitude_m=5.0, timeout_s=30.0)
+            await drone.takeoff(altitude_m=args.takeoff_alt, timeout_s=30.0)
 
-            result = await drone.precision_land(
+            log.info("Начинаю снижение по маркеру...")
+            await marker_guided_descent(
+                drone=drone,
                 get_marker_offset=src.marker_callback,
-                descent_rate_mps=0.3,
-                final_altitude_m=0.5,
-                horizontal_tolerance_m=0.15,
+                descent_rate_mps=args.descent_rate,
+                land_distance_m=args.land_distance,
                 timeout_s=120.0,
             )
-
-            log.info(f"Результат посадки: {result.status.value}")
-            log.info(f"Финальная позиция: {result.final_position}")
-
-            if not result:
-                log.warning("Точная посадка не удалась, выполняется обычная посадка")
-                await drone.land(timeout_s=30.0)
+            log.info("Миссия завершена")
 
 
 def main() -> None:
@@ -323,8 +457,14 @@ def main() -> None:
     parser.add_argument("--marker-size", type=float, default=0.17)
     parser.add_argument(
         "--camera-yaw", type=float, default=0.0,
-        help="Поворот камеры относительно носа дрона, градусы (0 = верх кадра к носу)"
+        help="Поворот камеры, градусы (0 = верх кадра к носу)"
     )
+    parser.add_argument("--takeoff-alt", type=float, default=3.0,
+                        help="Высота взлёта в метрах (default: 3.0)")
+    parser.add_argument("--descent-rate", type=float, default=0.2,
+                        help="Скорость снижения м/с (default: 0.2)")
+    parser.add_argument("--land-distance", type=float, default=0.5,
+                        help="Расстояние до маркера для посадки, м (default: 0.5)")
     args = parser.parse_args()
     asyncio.run(mission(args))
 
