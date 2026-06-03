@@ -279,41 +279,54 @@ class GazeboArucoSource:
 # ---------------------------------------------------------------------------
 
 class LandingTargetPublisher:
-    """Подключается к PX4 и шлёт LANDING_TARGET.
+    """Подключается к PX4.
 
-    Не берёт управление дроном. Слушает режимы FC и логирует переходы.
+    Фаза 1 (ручной полёт): шлёт LANDING_TARGET непрерывно.
+    Фаза 2 (OFFBOARD активирован пользователем): берёт управление —
+      центрируется над маркером, снижается, садится с фиксированным явом.
+
+    Переход происходит автоматически при смене режима на OFFBOARD.
     """
+
+    # type_mask для SET_POSITION_TARGET_LOCAL_NED:
+    # позиция + яв, игнорировать скорость/ускорение/яв-rate
+    _POS_YAW_MASK = (
+        0b0000_1111_1000  # ignore vel(3-5) + acc(6-8)
+        | 0b1000_0000_0000  # ignore yaw_rate(11)
+    )  # = 0x9F8 = 2552
 
     def __init__(
         self,
         connection_string: str,
         rate_hz: float = 15.0,
         landing_yaw_deg: float | None = None,
+        descent_rate_mps: float = 0.2,
+        land_distance_m: float = 0.5,
+        lateral_p_gain: float = 0.6,
     ) -> None:
         self._conn_str = connection_string
         self._rate_hz = rate_hz
-        self._mav: mavutil.mavfile | None = None  # type: ignore[type-arg]
-        self._mode_thread: threading.Thread | None = None
-        self._running = False
-        self._yaw_rad: float = 0.0       # текущий яв дрона из ATTITUDE
-        self._yaw_lock = threading.Lock()
-        self._current_mode: str = ""     # текущий режим FC
+        self._landing_yaw_deg = landing_yaw_deg
+        self._landing_yaw_rad = math.radians(landing_yaw_deg) if landing_yaw_deg is not None else None
+        self._descent_rate = descent_rate_mps
+        self._land_distance = land_distance_m
+        self._lateral_p = lateral_p_gain
 
-        # Желаемый яв при посадке (градусы, NED). None = не управлять явом.
-        self._landing_yaw_deg: float | None = landing_yaw_deg
+        self._mav: mavutil.mavfile | None = None  # type: ignore[type-arg]
+        self._running = False
+        self._current_mode: str = ""
+        self._yaw_rad: float = 0.0
+        self._ned: tuple[float, float, float] = (0.0, 0.0, 0.0)  # x, y, z
+        self._tele_lock = threading.Lock()
+
         if landing_yaw_deg is not None:
-            r = math.radians(landing_yaw_deg)
-            self._landing_q = [math.cos(r / 2), 0.0, 0.0, math.sin(r / 2)]
             log.info(f"Целевой яв при посадке: {landing_yaw_deg}°")
-        else:
-            self._landing_q = [1.0, 0.0, 0.0, 0.0]
 
     async def __aenter__(self) -> LandingTargetPublisher:
         log.info(f"Подключение к PX4: {self._conn_str}")
         self._mav = await asyncio.to_thread(self._connect)
         self._running = True
-        self._mode_thread = threading.Thread(target=self._mode_monitor, daemon=True)
-        self._mode_thread.start()
+        threading.Thread(target=self._telemetry_loop, daemon=True).start()
         return self
 
     async def __aexit__(self, *_: object) -> None:
@@ -322,105 +335,175 @@ class LandingTargetPublisher:
             self._mav.close()
 
     def _connect(self) -> mavutil.mavfile:  # type: ignore[type-arg]
-        # source_system=1 — companion computer (не 255/GCS).
-        # PX4 принимает LANDING_TARGET только от доверенных систем.
         mav = mavutil.mavlink_connection(self._conn_str, source_system=1)
         mav.wait_heartbeat(timeout=30)
-        log.info(
-            f"PX4 подключён. system={mav.target_system} "
-            f"component={mav.target_component}"
-        )
+        log.info(f"PX4 подключён. sys={mav.target_system} comp={mav.target_component}")
         return mav
 
-    def _mode_monitor(self) -> None:
-        """Фоновый тред: логирует режим FC и обновляет яв из ATTITUDE."""
+    def _telemetry_loop(self) -> None:
+        """Читает HEARTBEAT + ATTITUDE + LOCAL_POSITION_NED."""
         last_mode = None
         while self._running and self._mav:
             msg = self._mav.recv_match(
-                type=["HEARTBEAT", "ATTITUDE"], blocking=True, timeout=1.0
+                type=["HEARTBEAT", "ATTITUDE", "LOCAL_POSITION_NED"],
+                blocking=True, timeout=1.0,
             )
             if msg is None:
                 continue
+            t = msg.get_type()
 
-            if msg.get_type() == "ATTITUDE":
-                with self._yaw_lock:
+            if t == "ATTITUDE":
+                with self._tele_lock:
                     self._yaw_rad = float(msg.yaw)
-                continue
 
-            # HEARTBEAT — фильтруем только автопилот (component 1)
-            if msg.get_srcComponent() != mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1:
-                continue
+            elif t == "LOCAL_POSITION_NED":
+                with self._tele_lock:
+                    self._ned = (float(msg.x), float(msg.y), float(msg.z))
 
-            label = _decode_px4_mode(msg.custom_mode)
-            self._current_mode = label
-            if label != last_mode:
-                log.info(f"FC режим: {label}")
-                # При входе в PRECLAND — переотправляем landing с нужным явом
-                if label == "AUTO/PRECLAND" and self._landing_yaw_deg is not None:
-                    self._command_nav_land(self._landing_yaw_deg)
-                last_mode = label
+            elif t == "HEARTBEAT":
+                if msg.get_srcComponent() != mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1:
+                    continue
+                label = _decode_px4_mode(msg.custom_mode)
+                self._current_mode = label
+                if label != last_mode:
+                    log.info(f"FC режим: {label}")
+                    last_mode = label
 
-    def _command_nav_land(self, yaw_deg: float) -> None:
-        """Посылает MAV_CMD_NAV_LAND с желаемым явом и режимом precision landing.
-
-        param2=2 (MAV_PRECISION_LAND_MODE_REQUIRED) — обязательная точная посадка.
-        param4=yaw_deg — желаемый яв при касании земли (NaN = текущий яв).
-        param5/6=0 — текущее горизонтальное положение.
-        param7=0 — земля (текущий фрейм).
-        """
-        if self._mav is None:
-            return
-        log.info(f"MAV_CMD_NAV_LAND: precision landing, яв={yaw_deg}°")
-        self._mav.mav.command_long_send(
-            self._mav.target_system,
-            self._mav.target_component,
-            mavutil.mavlink.MAV_CMD_NAV_LAND,  # 21
-            0,               # confirmation
-            0.0,             # param1: abort altitude (0 = default)
-            2.0,             # param2: MAV_PRECISION_LAND_MODE_REQUIRED
-            0.0,             # param3: пусто
-            float(yaw_deg),  # param4: желаемый яв (градусы)
-            0.0,             # param5: широта (0 = текущая позиция)
-            0.0,             # param6: долгота (0 = текущая позиция)
-            0.0,             # param7: высота (0 = земля)
-        )
+    # ------------------------------------------------------------------
+    # Фаза 1: пассивный LANDING_TARGET
+    # ------------------------------------------------------------------
 
     async def run(self, get_marker_offset) -> None:
-        """Основной цикл: отправляет LANDING_TARGET когда маркер виден."""
+        """Ждёт OFFBOARD, затем переходит к активному снижению."""
         interval = 1.0 / self._rate_hz
-        sent_count = 0
+        sent = 0
         last_log = time.time()
+
         log.info(
-            "Издатель LANDING_TARGET запущен.\n"
-            "  → Летите вручную к месту посадки.\n"
-            "  → Переключите FC в режим Precision Land.\n"
-            "  → Ctrl+C для выхода."
+            "Скрипт запущен.\n"
+            "  Фаза 1: ручной полёт — шлю LANDING_TARGET.\n"
+            "  Переключите FC в OFFBOARD → начнётся активное снижение.\n"
+            "  Ctrl+C для выхода."
         )
 
         while True:
             t0 = time.time()
-            obs = get_marker_offset()
 
+            if self._current_mode == "OFFBOARD":
+                log.info("OFFBOARD обнаружен — начинаю активное снижение")
+                await self._offboard_descent(get_marker_offset)
+                return
+
+            obs = get_marker_offset()
             if obs is not None and obs.dz is not None:
                 self._send_landing_target(obs)
-                sent_count += 1
+                sent += 1
 
-            # Лог каждые 5 секунд
             now = time.time()
             if now - last_log >= 5.0:
                 if obs is not None and obs.dz is not None:
                     log.info(
-                        f"Маркер: dx={obs.dx:+.2f}m dy={obs.dy:+.2f}m "
-                        f"dz={obs.dz:.2f}m  отправлено={sent_count}"
+                        f"Маркер: dx={obs.dx:+.2f} dy={obs.dy:+.2f} "
+                        f"dz={obs.dz:.2f}m  lt_sent={sent}"
                     )
                 else:
                     log.info("Маркер не виден")
                 last_log = now
-                sent_count = 0
+                sent = 0
 
-            remaining = interval - (time.time() - t0)
-            if remaining > 0:
-                await asyncio.sleep(remaining)
+            rem = interval - (time.time() - t0)
+            if rem > 0:
+                await asyncio.sleep(rem)
+
+    # ------------------------------------------------------------------
+    # Фаза 2: OFFBOARD снижение с фиксированным явом
+    # ------------------------------------------------------------------
+
+    async def _offboard_descent(self, get_marker_offset) -> None:
+        interval = 1.0 / self._rate_hz
+        last_seen = time.time()
+        marker_lost_timeout = 3.0
+
+        with self._tele_lock:
+            hold_x, hold_y, hold_z = self._ned
+            current_yaw = self._yaw_rad
+
+        # Если landing_yaw задан — используем его, иначе держим текущий яв
+        target_yaw = self._landing_yaw_rad if self._landing_yaw_rad is not None else current_yaw
+        log.info(f"OFFBOARD снижение. Целевой яв: {math.degrees(target_yaw):.1f}°")
+
+        while True:
+            t0 = time.time()
+
+            with self._tele_lock:
+                pos_x, pos_y, pos_z = self._ned
+                cur_yaw = self._yaw_rad
+
+            obs = get_marker_offset()
+
+            if obs is not None and obs.dz is not None:
+                last_seen = time.time()
+
+                # Поворот смещения из body FRD в NED (используем cur_yaw для трансформа)
+                cos_y = math.cos(cur_yaw)
+                sin_y = math.sin(cur_yaw)
+                dx_ned = obs.dx * cos_y - obs.dy * sin_y
+                dy_ned = obs.dx * sin_y + obs.dy * cos_y
+
+                step = interval * self._descent_rate
+                hold_x = pos_x + dx_ned * self._lateral_p
+                hold_y = pos_y + dy_ned * self._lateral_p
+                hold_z = pos_z + step           # NED: z↑ = вниз
+
+                if obs.dz < self._land_distance:
+                    log.info(f"Маркер близко dz={obs.dz:.2f}m — посадка")
+                    self._send_land_command(target_yaw)
+                    return
+
+            else:
+                if time.time() - last_seen > marker_lost_timeout:
+                    log.warning("Маркер потерян — аварийная посадка")
+                    self._send_land_command(target_yaw)
+                    return
+
+            self._send_position_setpoint(hold_x, hold_y, hold_z, target_yaw)
+
+            rem = interval - (time.time() - t0)
+            if rem > 0:
+                await asyncio.sleep(rem)
+
+    def _send_position_setpoint(
+        self, x: float, y: float, z: float, yaw: float
+    ) -> None:
+        """SET_POSITION_TARGET_LOCAL_NED — позиция + яв."""
+        if self._mav is None:
+            return
+        self._mav.mav.set_position_target_local_ned_send(
+            0,                                        # time_boot_ms
+            self._mav.target_system,
+            self._mav.target_component,
+            mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+            self._POS_YAW_MASK,
+            x, y, z,                                  # позиция (NED, метры)
+            0.0, 0.0, 0.0,                            # скорость (игнор)
+            0.0, 0.0, 0.0,                            # ускорение (игнор)
+            float(yaw),                               # яв (рад)
+            0.0,                                      # яв-rate (игнор)
+        )
+
+    def _send_land_command(self, yaw_rad: float) -> None:
+        """Переключает PX4 в режим AUTO/LAND."""
+        if self._mav is None:
+            return
+        self._mav.mav.command_long_send(
+            self._mav.target_system,
+            self._mav.target_component,
+            mavutil.mavlink.MAV_CMD_NAV_LAND,
+            0,
+            0.0, 0.0, 0.0,
+            math.degrees(yaw_rad),   # param4: яв
+            0.0, 0.0, 0.0,
+        )
 
     def _send_landing_target(self, obs: MarkerObservation) -> None:
         if self._mav is None:
@@ -486,6 +569,8 @@ async def main_async(args) -> None:
             args.connection,
             rate_hz=args.rate,
             landing_yaw_deg=args.landing_yaw,
+            descent_rate_mps=args.descent_rate,
+            land_distance_m=args.land_distance,
         ) as lt:
             await lt.run(src.marker_callback)
 
@@ -510,12 +595,12 @@ def main() -> None:
                         help="Частота отправки LANDING_TARGET, Гц (default: 15)")
     parser.add_argument(
         "--landing-yaw", type=float, default=None,
-        help=(
-            "Желаемый яв при посадке, градусы в NED (0=север, 90=восток). "
-            "Если не задан — дрон садится с текущим явом. "
-            "PX4 параметр PLD_YAW_ERR задаёт допуск выравнивания."
-        ),
+        help="Желаемый яв при посадке, градусы NED (0=север, 90=восток).",
     )
+    parser.add_argument("--descent-rate", type=float, default=0.2,
+                        help="Скорость снижения в OFFBOARD, м/с (default: 0.2)")
+    parser.add_argument("--land-distance", type=float, default=0.5,
+                        help="Расстояние до маркера для посадки, м (default: 0.5)")
     args = parser.parse_args()
 
     try:
