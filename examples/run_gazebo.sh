@@ -10,7 +10,7 @@
 #   bash examples/run_gazebo.sh
 #   bash examples/run_gazebo.sh --connection udp:127.0.0.1:14540
 #
-#   # Пассивный издатель LANDING_TARGET, ручной полёт (06):
+#   # Ручной полёт → OFFBOARD → точная посадка (06):
 #   bash examples/run_gazebo.sh 06
 #   bash examples/run_gazebo.sh 06 --connection udp:127.0.0.1:14540
 
@@ -42,13 +42,13 @@ case "$EXAMPLE" in
     05|precision_land)
         SCRIPT="$SCRIPT_DIR/05_precision_land_gazebo.py"
         ;;
-    06|landing_target)
-        SCRIPT="$SCRIPT_DIR/06_landing_target_publisher.py"
+    06|manual)
+        SCRIPT="$SCRIPT_DIR/06_precision_land_gazebo_manual.py"
         ;;
     *)
         echo "Использование: bash run_gazebo.sh [05|06] [args...]"
-        echo "  05  — OFFBOARD точная посадка (default)"
-        echo "  06  — пассивный LANDING_TARGET, ручной полёт"
+        echo "  05  — автономно: взлёт → точная посадка (default)"
+        echo "  06  — ручной полёт → OFFBOARD → точная посадка"
         exit 1
         ;;
 esac

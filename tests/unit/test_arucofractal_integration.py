@@ -158,3 +158,45 @@ async def test_aenter_aexit_creates_and_stops_stream_and_detector(monkeypatch):
 
     mock_detector.stop.assert_called_once()
     mock_stream.stop.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# observation_from_detection — shared transform helper
+# ---------------------------------------------------------------------------
+
+def _detection_state(tvec_values):
+    state = MagicMock()
+    state.detected = True
+    state.has_pose = True
+    state.tvec = np.array(tvec_values, dtype=float).reshape(3, 1)
+    return state
+
+
+def test_observation_from_detection_none_when_state_missing():
+    from mavpilot.integrations.arucofractal import observation_from_detection
+    assert observation_from_detection(None) is None
+
+
+def test_observation_from_detection_none_when_no_pose():
+    from mavpilot.integrations.arucofractal import observation_from_detection
+    state = MagicMock()
+    state.detected = True
+    state.has_pose = False
+    assert observation_from_detection(state) is None
+
+
+def test_observation_from_detection_maps_tvec():
+    from mavpilot.integrations.arucofractal import observation_from_detection
+    obs = observation_from_detection(_detection_state([0.1, -0.3, 1.5]))
+    assert obs is not None
+    assert math.isclose(obs.dx, 0.3, abs_tol=1e-6)
+    assert math.isclose(obs.dy, 0.1, abs_tol=1e-6)
+    assert math.isclose(obs.dz, 1.5, abs_tol=1e-6)
+
+
+def test_observation_from_detection_yaw_90deg():
+    from mavpilot.integrations.arucofractal import observation_from_detection
+    obs = observation_from_detection(_detection_state([0.0, -1.0, 2.0]), camera_yaw_deg=90.0)
+    assert obs is not None
+    assert math.isclose(obs.dx, 0.0, abs_tol=1e-6)
+    assert math.isclose(obs.dy, 1.0, abs_tol=1e-6)

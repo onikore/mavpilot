@@ -721,6 +721,27 @@ class DroneController:
         """
         return await self._mission.set_yaw(yaw_deg, timeout_s=timeout_s)
 
+    async def wait_for_offboard(
+        self, poll_hz: float = 20.0, timeout_s: float | None = None
+    ) -> None:
+        """Stream hold-position setpoints until the pilot switches to OFFBOARD.
+
+        Companion-flow helper: a human flies manually, then hands off to the
+        script. PX4 requires a fresh setpoint stream *before* it will accept an
+        OFFBOARD switch, so this starts the streamer and republishes the current
+        position as the setpoint until OFFBOARD is observed. Call
+        :meth:`wait_until_ready` first.
+
+        Args:
+            poll_hz: How often to refresh the hold setpoint while waiting.
+            timeout_s: Optional cap in seconds; raises :class:`DroneError` if
+                OFFBOARD is not entered in time. ``None`` waits indefinitely.
+
+        Raises:
+            DroneError: If the watchdog tripped or the timeout elapsed.
+        """
+        return await self._mission.wait_for_offboard(poll_hz=poll_hz, timeout_s=timeout_s)
+
     async def land(self, timeout_s: float = 60.0) -> bool:
         """Switch to PX4 AUTO_LAND and wait until on the ground.
 

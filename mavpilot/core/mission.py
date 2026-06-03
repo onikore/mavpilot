@@ -246,6 +246,39 @@ class MissionOps:
         logger.warning(f"Yaw timeout (err {math.degrees(err):.1f}°)")
         return False
 
+    async def wait_for_offboard(
+        self, poll_hz: float = 20.0, timeout_s: float | None = None
+    ) -> None:
+        """Stream hold-position setpoints until the pilot switches to OFFBOARD.
+
+        Companion-flow helper for the case where a human flies the vehicle
+        manually and then hands off to the script. PX4 requires a fresh setpoint
+        stream *before* it will accept an OFFBOARD switch, so this starts the
+        streamer and continuously republishes the current position as the
+        setpoint until OFFBOARD is observed.
+
+        Requires :meth:`wait_until_ready` to have run first (the streamer needs
+        a valid LOCAL_POSITION_NED). Returns once OFFBOARD is active.
+
+        Args:
+            poll_hz: How often to refresh the hold setpoint while waiting.
+            timeout_s: Optional cap; raises :class:`DroneError` if OFFBOARD is
+                not entered within this many seconds. ``None`` waits forever.
+        """
+        c = self._ctx
+        self.check_watchdog()
+        c._ensure_streamer_started()
+        logger.info("Streaming hold-setpoints — waiting for OFFBOARD switch")
+        interval = 1.0 / poll_hz
+        start = time.time()
+        while not c.is_offboard():
+            if timeout_s is not None and time.time() - start > timeout_s:
+                raise DroneError(f"OFFBOARD not entered within {timeout_s}s")
+            pos = c.get_local_position()
+            c._set_setpoint_position(pos.x, pos.y, pos.z, c.get_yaw_rad())
+            await asyncio.sleep(interval)
+        logger.info("OFFBOARD active")
+
     async def land(self, timeout_s: float = 60.0) -> bool:
         """Switch to AUTO_LAND and wait until on-ground."""
         c = self._ctx
