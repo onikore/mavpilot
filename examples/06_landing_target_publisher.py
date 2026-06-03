@@ -297,15 +297,16 @@ class LandingTargetPublisher:
         self._running = False
         self._yaw_rad: float = 0.0       # текущий яв дрона из ATTITUDE
         self._yaw_lock = threading.Lock()
+        self._current_mode: str = ""     # текущий режим FC
 
-        # Желаемый яв при посадке. None = не задавать (q = нейтральный).
-        # PX4 использует q из LANDING_TARGET для выравнивания яв.
-        # Параметр PLD_YAW_ERR задаёт допуск по яву.
+        # Желаемый яв при посадке (градусы, NED). None = не управлять явом.
+        self._landing_yaw_deg: float | None = landing_yaw_deg
         if landing_yaw_deg is not None:
             r = math.radians(landing_yaw_deg)
             self._landing_q = [math.cos(r / 2), 0.0, 0.0, math.sin(r / 2)]
+            log.info(f"Целевой яв при посадке: {landing_yaw_deg}°")
         else:
-            self._landing_q = [1.0, 0.0, 0.0, 0.0]  # нейтральный
+            self._landing_q = [1.0, 0.0, 0.0, 0.0]
 
     async def __aenter__(self) -> LandingTargetPublisher:
         log.info(f"Подключение к PX4: {self._conn_str}")
@@ -351,15 +352,37 @@ class LandingTargetPublisher:
                 continue
 
             label = _decode_px4_mode(msg.custom_mode)
+            self._current_mode = label
             if label != last_mode:
                 log.info(f"FC режим: {label}")
+                # При входе в PRECLAND — немедленно командуем нужный яв
+                if label == "AUTO/PRECLAND" and self._landing_yaw_deg is not None:
+                    self._command_yaw(self._landing_yaw_deg)
                 last_mode = label
+
+    def _command_yaw(self, yaw_deg: float) -> None:
+        """Посылает MAV_CMD_CONDITION_YAW — разворот на абсолютный угол в NED."""
+        if self._mav is None:
+            return
+        log.info(f"Команда разворота: {yaw_deg}°")
+        self._mav.mav.command_long_send(
+            self._mav.target_system,
+            self._mav.target_component,
+            mavutil.mavlink.MAV_CMD_CONDITION_YAW,
+            0,               # confirmation
+            float(yaw_deg),  # param1: целевой угол (градусы)
+            20.0,            # param2: скорость разворота (град/с)
+            1,               # param3: направление 1=CW (по часовой)
+            0,               # param4: 0=абсолютный угол, 1=относительный
+            0, 0, 0,
+        )
 
     async def run(self, get_marker_offset) -> None:
         """Основной цикл: отправляет LANDING_TARGET когда маркер виден."""
         interval = 1.0 / self._rate_hz
         sent_count = 0
         last_log = time.time()
+        last_yaw_cmd = 0.0   # время последней команды яв
 
         log.info(
             "Издатель LANDING_TARGET запущен.\n"
@@ -375,6 +398,16 @@ class LandingTargetPublisher:
             if obs is not None and obs.dz is not None:
                 self._send_landing_target(obs)
                 sent_count += 1
+
+            # Периодически повторяем команду яв во время PRECLAND
+            # (раз в 2с — PX4 может сбросить первую команду)
+            if (
+                self._landing_yaw_deg is not None
+                and self._current_mode == "AUTO/PRECLAND"
+                and t0 - last_yaw_cmd >= 2.0
+            ):
+                self._command_yaw(self._landing_yaw_deg)
+                last_yaw_cmd = t0
 
             # Лог каждые 5 секунд
             now = time.time()
