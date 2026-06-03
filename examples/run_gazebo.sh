@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
-# Запускает 05_precision_land_gazebo.py с нужными переменными окружения:
+# Запускает примеры Gazebo с нужными переменными окружения:
 #   LD_LIBRARY_PATH  — путь к libaruco.so.3.1
 #   PYTHONPATH       — путь к aruco Python-пакету (из venv arucofractal)
 #
 # Использование:
 #   source /opt/ros/jazzy/setup.bash
+#
+#   # OFFBOARD точная посадка (05):
 #   bash examples/run_gazebo.sh
 #   bash examples/run_gazebo.sh --connection udp:127.0.0.1:14540
+#
+#   # Пассивный издатель LANDING_TARGET, ручной полёт (06):
+#   bash examples/run_gazebo.sh 06
+#   bash examples/run_gazebo.sh 06 --connection udp:127.0.0.1:14540
 
 set -e
 
@@ -28,7 +34,24 @@ fi
 export LD_LIBRARY_PATH="$LIBARUCO_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PYTHONPATH="$ARUCO_SITE${PYTHONPATH:+:$PYTHONPATH}"
 
-echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
-echo "PYTHONPATH (aruco): $ARUCO_SITE"
+# Выбор скрипта: первый аргумент "06" → landing_target_publisher, иначе → precision_land
+EXAMPLE="${1:-05}"
+shift 2>/dev/null || true
 
-exec python3 "$SCRIPT_DIR/05_precision_land_gazebo.py" "$@"
+case "$EXAMPLE" in
+    05|precision_land)
+        SCRIPT="$SCRIPT_DIR/05_precision_land_gazebo.py"
+        ;;
+    06|landing_target)
+        SCRIPT="$SCRIPT_DIR/06_landing_target_publisher.py"
+        ;;
+    *)
+        echo "Использование: bash run_gazebo.sh [05|06] [args...]"
+        echo "  05  — OFFBOARD точная посадка (default)"
+        echo "  06  — пассивный LANDING_TARGET, ручной полёт"
+        exit 1
+        ;;
+esac
+
+echo "Запуск: $SCRIPT $*"
+exec python3 "$SCRIPT" "$@"
