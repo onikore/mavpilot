@@ -363,13 +363,16 @@ class LandingTargetPublisher:
 
                     elif phase == "ROTATE":
                         hz = pz
-                        yaw_err = (target_yaw - setpoint_yaw + math.pi) % (2 * math.pi) - math.pi
-                        step = math.copysign(min(abs(yaw_err), self._yaw_rate * interval), yaw_err)
+                        # Плавно двигаем setpoint к цели (ограничиваем скорость)
+                        cmd_err = (target_yaw - setpoint_yaw + math.pi) % (2 * math.pi) - math.pi
+                        step = math.copysign(min(abs(cmd_err), self._yaw_rate * interval), cmd_err)
                         setpoint_yaw += step
-                        if abs(yaw_err) < self._yaw_tol:
+                        # Переход в DESCEND только когда ФАКТИЧЕСКИЙ яв достиг цели
+                        actual_err = (target_yaw - cyaw + math.pi) % (2 * math.pi) - math.pi
+                        if abs(actual_err) < self._yaw_tol:
                             setpoint_yaw = target_yaw
                             phase = "DESCEND"
-                            log.info(f"yaw aligned ({math.degrees(target_yaw):.1f}°) → descending")
+                            log.info(f"yaw reached {math.degrees(cyaw):.1f}° → descending")
 
                     elif phase == "DESCEND":
                         hz = pz + interval * self._descent_rate
