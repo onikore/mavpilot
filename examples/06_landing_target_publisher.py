@@ -236,6 +236,9 @@ class LandingTargetPublisher:
         descent_rate_mps: float = 0.2,
         land_distance_m: float = 0.5,
         lateral_p_gain: float = 0.6,
+        center_tolerance_m: float = 0.15,
+        yaw_rate_deg_s: float = 15.0,
+        yaw_tolerance_deg: float = 5.0,
     ) -> None:
         self._conn_str = connection_string
         self._rate_hz = rate_hz
@@ -243,6 +246,9 @@ class LandingTargetPublisher:
         self._descent_rate = descent_rate_mps
         self._land_dist = land_distance_m
         self._lat_p = lateral_p_gain
+        self._center_tol = center_tolerance_m
+        self._yaw_rate = math.radians(yaw_rate_deg_s)
+        self._yaw_tol = math.radians(yaw_tolerance_deg)
 
         # q для LANDING_TARGET (желаемая ориентация площадки)
         yaw_r = self._landing_yaw_rad or 0.0
@@ -302,11 +308,13 @@ class LandingTargetPublisher:
     async def run(self, get_marker_offset) -> None:
         """Единый цикл: hold-setpoints (для разрешения OFFBOARD) + снижение."""
         interval = 1.0 / self._rate_hz
-        last_seen = time.time()
         last_log = time.time()
-        marker_lost_s = 3.0
         in_offboard = False
+        phase = "CENTER"      # CENTER → ROTATE → DESCEND
         target_yaw = 0.0
+        setpoint_yaw = 0.0
+        last_seen = time.time()
+        marker_lost_s = 3.0
 
         # Ждём первую позицию (до 5с)
         for _ in range(50):
@@ -317,7 +325,6 @@ class LandingTargetPublisher:
 
         with self._lock:
             hx, hy, hz = self._ned
-            hyaw = self._yaw
 
         log.info("ready — switch FC to OFFBOARD when over the pad")
 
@@ -331,38 +338,68 @@ class LandingTargetPublisher:
             if self._mode == "OFFBOARD":
                 if not in_offboard:
                     in_offboard = True
+                    phase = "CENTER"
                     target_yaw = self._landing_yaw_rad if self._landing_yaw_rad is not None else cyaw
-                    log.info(f"OFFBOARD descent, yaw={math.degrees(target_yaw):.1f}°")
+                    setpoint_yaw = cyaw
+                    hx, hy, hz = px, py, pz
+                    log.info(f"OFFBOARD: CENTER → ROTATE → DESCEND  target_yaw={math.degrees(target_yaw):.1f}°")
 
                 if obs is not None and obs.dz is not None:
                     last_seen = time.time()
-                    # body FRD → NED (использует текущий яв для трансформа)
                     cos_y, sin_y = math.cos(cyaw), math.sin(cyaw)
-                    hx = px + (obs.dx * cos_y - obs.dy * sin_y) * self._lat_p
-                    hy = py + (obs.dx * sin_y + obs.dy * cos_y) * self._lat_p
-                    hz = pz + interval * self._descent_rate
-                    if obs.dz < self._land_dist:
-                        log.info(f"dz={obs.dz:.2f}m — landing")
-                        self._land(target_yaw)
-                        return
-                elif time.time() - last_seen > marker_lost_s:
-                    log.warning("marker lost — emergency land")
+                    dx_ned = obs.dx * cos_y - obs.dy * sin_y
+                    dy_ned = obs.dx * sin_y + obs.dy * cos_y
+                    horiz_err = math.hypot(dx_ned, dy_ned)
+
+                    # Горизонтальная корректировка — во всех фазах
+                    hx = px + dx_ned * self._lat_p
+                    hy = py + dy_ned * self._lat_p
+
+                    if phase == "CENTER":
+                        hz = pz  # высота не меняется
+                        if horiz_err < self._center_tol:
+                            phase = "ROTATE"
+                            log.info(f"centered (err={horiz_err:.2f}m) → rotating")
+
+                    elif phase == "ROTATE":
+                        hz = pz
+                        yaw_err = (target_yaw - setpoint_yaw + math.pi) % (2 * math.pi) - math.pi
+                        step = math.copysign(min(abs(yaw_err), self._yaw_rate * interval), yaw_err)
+                        setpoint_yaw += step
+                        if abs(yaw_err) < self._yaw_tol:
+                            setpoint_yaw = target_yaw
+                            phase = "DESCEND"
+                            log.info(f"yaw aligned ({math.degrees(target_yaw):.1f}°) → descending")
+
+                    elif phase == "DESCEND":
+                        hz = pz + interval * self._descent_rate
+                        if obs.dz < self._land_dist:
+                            log.info(f"dz={obs.dz:.2f}m — landing")
+                            self._land(target_yaw)
+                            return
+
+                elif phase == "DESCEND" and time.time() - last_seen > marker_lost_s:
+                    log.warning("marker lost during descent — emergency land")
                     self._land(target_yaw)
                     return
 
-                self._pos_setpoint(hx, hy, hz, target_yaw)
+                self._pos_setpoint(hx, hy, hz, setpoint_yaw)
 
             else:
                 in_offboard = False
-                hx, hy, hz, hyaw = px, py, pz, cyaw
+                hx, hy, hz = px, py, pz
                 # Hold-setpoints: поток нужен до переключения в OFFBOARD
-                self._pos_setpoint(hx, hy, hz, hyaw)
+                self._pos_setpoint(hx, hy, hz, cyaw)
                 if obs is not None and obs.dz is not None:
                     self._landing_target(obs)
 
             if time.time() - last_log >= 5.0:
-                info = f"dz={obs.dz:.2f}m" if obs and obs.dz else "no marker"
-                log.info(f"[{self._mode}] {info}")
+                if self._mode == "OFFBOARD":
+                    info = f"dz={obs.dz:.2f}m" if obs and obs.dz else "no marker"
+                    log.info(f"[{phase}] {info}")
+                else:
+                    info = f"dz={obs.dz:.2f}m" if obs and obs.dz else "no marker"
+                    log.info(f"[{self._mode}] {info}")
                 last_log = time.time()
 
             rem = interval - (time.time() - t0)
@@ -426,6 +463,9 @@ async def main_async(args) -> None:
             landing_yaw_deg=args.landing_yaw,
             descent_rate_mps=args.descent_rate,
             land_distance_m=args.land_distance,
+            center_tolerance_m=args.center_tolerance,
+            yaw_rate_deg_s=args.yaw_rate,
+            yaw_tolerance_deg=args.yaw_tolerance,
         ) as lt:
             await lt.run(src.marker_callback)
 
@@ -441,6 +481,9 @@ def main() -> None:
     p.add_argument("--landing-yaw",       type=float, default=None,  help="desired yaw at touchdown, deg NED")
     p.add_argument("--descent-rate",      type=float, default=0.2,   help="descent speed in OFFBOARD, m/s")
     p.add_argument("--land-distance",     type=float, default=0.5,   help="dz threshold to trigger land, m")
+    p.add_argument("--center-tolerance",  type=float, default=0.15,  help="horizontal centering radius, m")
+    p.add_argument("--yaw-rate",          type=float, default=15.0,  help="yaw rotation speed, deg/s")
+    p.add_argument("--yaw-tolerance",     type=float, default=5.0,   help="yaw alignment tolerance, deg")
     args = p.parse_args()
     try:
         asyncio.run(main_async(args))
