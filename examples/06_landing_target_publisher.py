@@ -30,7 +30,6 @@ import argparse
 import logging
 import math
 import subprocess
-import sys
 import threading
 import time
 
@@ -359,22 +358,29 @@ class LandingTargetPublisher:
         if self._mav is None:
             return
         dz = obs.dz if obs.dz is not None else 0.0
+        if dz <= 0:
+            return
+
+        # Угловой формат — работает во всех версиях PX4 (position_valid не нужен).
+        # MAV_FRAME_BODY_FRD (12) и MAV_FRAME_BODY_NED (8) поддерживаются
+        # не во всех версиях, поэтому используем углы.
+        #
+        # Камера смотрит вниз, верх кадра = нос дрона:
+        #   angle_x > 0  →  маркер правее центра кадра  →  obs.dy > 0
+        #   angle_y < 0  →  маркер выше  центра кадра   →  маркер впереди (obs.dx > 0)
+        angle_x = math.atan2(obs.dy, dz)   # lateral:       правее = положительный
+        angle_y = math.atan2(-obs.dx, dz)  # longitudinal:  вперёд = отрицательный
+
         try:
             self._mav.mav.landing_target_send(
-                int(time.time() * 1e6),          # time_usec
-                0,                                # target_num
-                mavutil.mavlink.MAV_FRAME_BODY_FRD,  # frame
-                0.0,                              # angle_x (не используется)
-                0.0,                              # angle_y (не используется)
-                float(dz),                        # distance
-                0.0,                              # size_x
-                0.0,                              # size_y
-                float(obs.dx),                    # x: вперёд в теле дрона
-                float(obs.dy),                    # y: вправо в теле дрона
-                float(dz),                        # z: вниз (расстояние до маркера)
-                [1.0, 0.0, 0.0, 0.0],            # q (нейтральный кватернион)
-                mavutil.mavlink.LANDING_TARGET_TYPE_LIGHT_BEACON,
-                1,                                # position_valid
+                int(time.time() * 1e6),             # time_usec
+                0,                                   # target_num
+                mavutil.mavlink.MAV_FRAME_LOCAL_NED, # frame (принимается PX4)
+                float(angle_x),                      # angle_x: латеральный угол
+                float(angle_y),                      # angle_y: продольный угол
+                float(dz),                           # distance: расстояние до маркера
+                0.0,                                 # size_x
+                0.0,                                 # size_y
             )
         except Exception as e:
             log.debug(f"landing_target_send: {e}")
