@@ -284,14 +284,28 @@ class LandingTargetPublisher:
     Не берёт управление дроном. Слушает режимы FC и логирует переходы.
     """
 
-    def __init__(self, connection_string: str, rate_hz: float = 15.0) -> None:
+    def __init__(
+        self,
+        connection_string: str,
+        rate_hz: float = 15.0,
+        landing_yaw_deg: float | None = None,
+    ) -> None:
         self._conn_str = connection_string
         self._rate_hz = rate_hz
         self._mav: mavutil.mavfile | None = None  # type: ignore[type-arg]
         self._mode_thread: threading.Thread | None = None
         self._running = False
-        self._yaw_rad: float = 0.0       # яв дрона, обновляется из ATTITUDE
+        self._yaw_rad: float = 0.0       # текущий яв дрона из ATTITUDE
         self._yaw_lock = threading.Lock()
+
+        # Желаемый яв при посадке. None = не задавать (q = нейтральный).
+        # PX4 использует q из LANDING_TARGET для выравнивания яв.
+        # Параметр PLD_YAW_ERR задаёт допуск по яву.
+        if landing_yaw_deg is not None:
+            r = math.radians(landing_yaw_deg)
+            self._landing_q = [math.cos(r / 2), 0.0, 0.0, math.sin(r / 2)]
+        else:
+            self._landing_q = [1.0, 0.0, 0.0, 0.0]  # нейтральный
 
     async def __aenter__(self) -> LandingTargetPublisher:
         log.info(f"Подключение к PX4: {self._conn_str}")
@@ -420,7 +434,7 @@ class LandingTargetPublisher:
                 float(x_ned),                         # x: смещение на север (м)
                 float(y_ned),                         # y: смещение на восток (м)
                 float(z_ned),                         # z: смещение вниз (м)
-                [1.0, 0.0, 0.0, 0.0],                # q (нейтральный кватернион)
+                self._landing_q,                      # q: желаемый яв при посадке
                 mavutil.mavlink.LANDING_TARGET_TYPE_LIGHT_BEACON,
                 1,                                    # position_valid
             )
@@ -439,7 +453,11 @@ async def main_async(args) -> None:
         marker_size=args.marker_size,
         camera_yaw_deg=args.camera_yaw,
     ) as src:
-        async with LandingTargetPublisher(args.connection, rate_hz=args.rate) as lt:
+        async with LandingTargetPublisher(
+            args.connection,
+            rate_hz=args.rate,
+            landing_yaw_deg=args.landing_yaw,
+        ) as lt:
             await lt.run(src.marker_callback)
 
 
@@ -461,6 +479,14 @@ def main() -> None:
                         help="Поворот камеры, градусы (0 = верх кадра к носу)")
     parser.add_argument("--rate", type=float, default=15.0,
                         help="Частота отправки LANDING_TARGET, Гц (default: 15)")
+    parser.add_argument(
+        "--landing-yaw", type=float, default=None,
+        help=(
+            "Желаемый яв при посадке, градусы в NED (0=север, 90=восток). "
+            "Если не задан — дрон садится с текущим явом. "
+            "PX4 параметр PLD_YAW_ERR задаёт допуск выравнивания."
+        ),
+    )
     args = parser.parse_args()
 
     try:
