@@ -49,12 +49,25 @@ CAMERA_INFO_TOPIC = (
     "/world/aruco/model/x500_mono_cam_down_0/link/camera_link/sensor/camera/camera_info"
 )
 
-# Названия режимов PX4 для отображения в логах
-_PX4_MODES = {
-    0: "MANUAL", 1: "ALTCTL", 2: "POSCTL", 3: "AUTO",
-    4: "ACRO", 6: "OFFBOARD", 7: "STABILIZED", 8: "RATTITUDE",
+# PX4 custom_mode упакован: bits[16:24] = main_mode, bits[24:32] = sub_mode
+_PX4_MAIN_MODES = {
+    1: "MANUAL", 2: "ALTCTL", 3: "POSCTL", 4: "AUTO",
+    5: "ACRO",   6: "OFFBOARD", 7: "STABILIZED", 8: "RATTITUDE",
 }
-_PX4_SUBMODES = {17: "TAKEOFF", 21: "LAND", 20: "LOITER", 4: "MISSION"}
+# Sub-mode только для AUTO (main_mode == 4)
+_PX4_AUTO_SUBMODES = {
+    2: "TAKEOFF", 3: "LOITER", 4: "MISSION", 5: "RTL",
+    6: "LAND",    9: "PRECLAND",
+}
+
+
+def _decode_px4_mode(custom_mode: int) -> str:
+    main = (custom_mode >> 16) & 0xFF
+    sub  = (custom_mode >> 24) & 0xFF
+    name = _PX4_MAIN_MODES.get(main, f"MAIN_{main}")
+    if main == 4 and sub:  # AUTO + sub-mode
+        name = f"AUTO/{_PX4_AUTO_SUBMODES.get(sub, f'SUB_{sub}')}"
+    return name
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +290,8 @@ class LandingTargetPublisher:
         self._mav: mavutil.mavfile | None = None  # type: ignore[type-arg]
         self._mode_thread: threading.Thread | None = None
         self._running = False
+        self._yaw_rad: float = 0.0       # яв дрона, обновляется из ATTITUDE
+        self._yaw_lock = threading.Lock()
 
     async def __aenter__(self) -> LandingTargetPublisher:
         log.info(f"Подключение к PX4: {self._conn_str}")
@@ -301,17 +316,25 @@ class LandingTargetPublisher:
         return mav
 
     def _mode_monitor(self) -> None:
-        """Фоновый тред: логирует смену режима полёта."""
+        """Фоновый тред: логирует режим FC и обновляет яв из ATTITUDE."""
         last_mode = None
         while self._running and self._mav:
-            msg = self._mav.recv_match(type="HEARTBEAT", blocking=True, timeout=1.0)
+            msg = self._mav.recv_match(
+                type=["HEARTBEAT", "ATTITUDE"], blocking=True, timeout=1.0
+            )
             if msg is None:
                 continue
-            mode = msg.custom_mode
-            base = (msg.base_mode >> 0) & 0xFF
-            mode_name = _PX4_MODES.get(mode, f"MODE_{mode}")
-            sub_name = _PX4_SUBMODES.get(mode, "")
-            label = f"{mode_name}/{sub_name}" if sub_name else mode_name
+
+            if msg.get_type() == "ATTITUDE":
+                with self._yaw_lock:
+                    self._yaw_rad = float(msg.yaw)
+                continue
+
+            # HEARTBEAT — фильтруем только автопилот (component 1)
+            if msg.get_srcComponent() != mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1:
+                continue
+
+            label = _decode_px4_mode(msg.custom_mode)
             if label != last_mode:
                 log.info(f"FC режим: {label}")
                 last_mode = label
@@ -361,26 +384,43 @@ class LandingTargetPublisher:
         if dz <= 0:
             return
 
-        # Угловой формат — работает во всех версиях PX4 (position_valid не нужен).
-        # MAV_FRAME_BODY_FRD (12) и MAV_FRAME_BODY_NED (8) поддерживаются
-        # не во всех версиях, поэтому используем углы.
+        # По документации PX4 precision landing:
+        #   frame = MAV_FRAME_LOCAL_NED
+        #   x, y, z = позиция маркера относительно дрона в NED-фрейме (метры)
+        #   position_valid = 1
         #
-        # Камера смотрит вниз, верх кадра = нос дрона:
-        #   angle_x > 0  →  маркер правее центра кадра  →  obs.dy > 0
-        #   angle_y < 0  →  маркер выше  центра кадра   →  маркер впереди (obs.dx > 0)
-        angle_x = math.atan2(obs.dy, dz)   # lateral:       правее = положительный
-        angle_y = math.atan2(-obs.dx, dz)  # longitudinal:  вперёд = отрицательный
+        # Наблюдение из камеры в теле дрона (FRD):
+        #   obs.dx = вперёд, obs.dy = вправо, dz = вниз/расстояние
+        #
+        # Поворот body FRD → NED с учётом яв дрона:
+        #   x_ned =  dx * cos(yaw) - dy * sin(yaw)   (North)
+        #   y_ned =  dx * sin(yaw) + dy * cos(yaw)   (East)
+        #   z_ned =  dz                               (Down, положительный)
+        with self._yaw_lock:
+            yaw = self._yaw_rad
+
+        cos_y = math.cos(yaw)
+        sin_y = math.sin(yaw)
+        x_ned = obs.dx * cos_y - obs.dy * sin_y
+        y_ned = obs.dx * sin_y + obs.dy * cos_y
+        z_ned = dz
 
         try:
             self._mav.mav.landing_target_send(
-                int(time.time() * 1e6),             # time_usec
-                0,                                   # target_num
-                mavutil.mavlink.MAV_FRAME_LOCAL_NED, # frame (принимается PX4)
-                float(angle_x),                      # angle_x: латеральный угол
-                float(angle_y),                      # angle_y: продольный угол
-                float(dz),                           # distance: расстояние до маркера
-                0.0,                                 # size_x
-                0.0,                                 # size_y
+                int(time.time() * 1e6),              # time_usec
+                0,                                    # target_num
+                mavutil.mavlink.MAV_FRAME_LOCAL_NED,  # frame — требуется по доке
+                0.0,                                  # angle_x (не используется)
+                0.0,                                  # angle_y (не используется)
+                float(dz),                            # distance
+                0.0,                                  # size_x
+                0.0,                                  # size_y
+                float(x_ned),                         # x: смещение на север (м)
+                float(y_ned),                         # y: смещение на восток (м)
+                float(z_ned),                         # z: смещение вниз (м)
+                [1.0, 0.0, 0.0, 0.0],                # q (нейтральный кватернион)
+                mavutil.mavlink.LANDING_TARGET_TYPE_LIGHT_BEACON,
+                1,                                    # position_valid
             )
         except Exception as e:
             log.debug(f"landing_target_send: {e}")
