@@ -214,10 +214,14 @@ class GazeboArucoSource:
 # ---------------------------------------------------------------------------
 
 async def run_mission(src: GazeboArucoSource, drone: DroneController, args) -> None:
-    log.info("waiting for OFFBOARD — switch FC to OFFBOARD when over the pad")
+    # Ждём EKF + local position (дрон летит — должно быть быстро)
+    await drone.wait_until_ready(timeout_s=60.0)
 
-    # Стримим hold-setpoints пока не активируется OFFBOARD.
-    # PX4 требует активный поток ДО переключения, иначе отклоняет.
+    # Запускаем OffboardStreamer: он начинает отправлять SET_POSITION_TARGET_LOCAL_NED.
+    # PX4 требует активный поток ДО переключения в OFFBOARD — иначе отклоняет.
+    drone._streamer.start()
+    log.info("setpoint stream active — switch FC to OFFBOARD when over the pad")
+
     while not drone.is_offboard():
         pos = drone.get_local_position()
         drone._set_setpoint_position(pos.x, pos.y, pos.z, drone.get_yaw_rad())
