@@ -48,3 +48,4 @@ CLAUDE.md
 docs/superpowers/
 # Generated API docs (built by pdoc in CI / scripts/build_docs.sh).
 docs/api/
+arucofractal/
