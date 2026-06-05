@@ -2,13 +2,13 @@
 
 Gazebo publishes camera topics over gz-transport, which ROS2 cannot see
 directly. This module starts a ``ros_gz_bridge`` to forward them into ROS2,
-reads frames and camera intrinsics, and feeds them to arucofractal for marker
-detection — exposing :meth:`GazeboArucoSource.marker_callback` for
+reads frames and camera intrinsics, and feeds them to nanofractal for marker
+detection — exposing :meth:`GazeboFractalSource.marker_callback` for
 :meth:`mavpilot.DroneController.precision_land`.
 
-``rclpy``, ``cv2`` and ``arucofractal`` are soft dependencies, imported lazily
-so the rest of mavpilot is unaffected when they're absent. The deps come from a
-ROS2 install (``source /opt/ros/<distro>/setup.bash``), not pip.
+``rclpy``, ``cv2`` and ``nanofractal`` are soft dependencies, imported lazily so
+the rest of mavpilot is unaffected when they're absent. ``rclpy`` comes from a
+ROS2 install (``source /opt/ros/<distro>/setup.bash``); nanofractal from pip.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import time
 
 from mavpilot.types import MarkerObservation
 
-from .arucofractal import observation_from_detection
+from .nanofractal import FractalDetectorWorker
 
 log = logging.getLogger("drone")
 
@@ -79,9 +79,10 @@ def wait_for_camera_info(node, topic: str, timeout_s: float = 10.0) -> dict:
 class ROS2ImageStream:
     """Subscribes to ``sensor_msgs/Image`` and exposes frames via ``read()``.
 
-    Compatible with ``arucofractal.DetectionThread`` (it expects an object with
-    ``read() -> np.ndarray | None``). Decodes manually with numpy — cv_bridge
-    is avoided because it segfaults when built against a different NumPy ABI.
+    Compatible with :class:`~mavpilot.integrations.nanofractal.FractalDetectorWorker`
+    (it expects an object with ``read() -> np.ndarray | None``). Decodes manually
+    with numpy — cv_bridge is avoided because it segfaults when built against a
+    different NumPy ABI.
     """
 
     def __init__(self, node, topic: str) -> None:
@@ -120,8 +121,8 @@ class ROS2ImageStream:
 class DetectionImagePublisher:
     """Publishes the detection overlay to ``/mavpilot/detection_image`` (bgr8).
 
-    Runs a background thread that draws arucofractal overlays + a dz/fps banner
-    onto the latest frame. View with::
+    Runs a background thread that draws the worker's marker/axes overlay plus a
+    dz/fps banner onto the latest frame. View with::
 
         ros2 run rqt_image_view rqt_image_view /mavpilot/detection_image
     """
@@ -130,13 +131,13 @@ class DetectionImagePublisher:
         self,
         node,
         stream: ROS2ImageStream,
-        detector,
+        worker: FractalDetectorWorker,
         fps: float = 10.0,
         topic: str = "/mavpilot/detection_image",
     ) -> None:
         from sensor_msgs.msg import Image  # type: ignore[import]
 
-        self._node, self._stream, self._detector = node, stream, detector
+        self._node, self._stream, self._worker = node, stream, worker
         self._interval = 1.0 / fps
         self._running = True
         self._pub = node.create_publisher(Image, topic, 1)
@@ -152,12 +153,13 @@ class DetectionImagePublisher:
             frame = self._stream.read()
             if frame is not None:
                 vis = frame.copy()
-                self._detector.draw_overlays(vis)
-                st = self._detector.state
-                if st and st.detected and st.has_pose:
+                self._worker.draw_overlays(vis)
+                pose = self._worker.last_pose
+                if pose is not None:
+                    dz = float(pose[1][2])
                     cv2.putText(
                         vis,
-                        f"dz={st.tvec.flatten()[2]:.2f}m  {self._detector.det_fps:.0f}fps",
+                        f"dz={dz:.2f}m  {self._worker.fps:.0f}fps",
                         (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.8,
@@ -190,17 +192,18 @@ DEFAULT_CAMERA_INFO_TOPIC = (
 )
 
 
-class GazeboArucoSource:
-    """Async context manager: Gazebo camera → arucofractal marker detection.
+class GazeboFractalSource:
+    """Async context manager: Gazebo camera → nanofractal marker detection.
 
     On ``__aenter__`` it starts the gz bridge, reads camera intrinsics from the
-    ``camera_info`` topic, builds an arucofractal detector on the image stream,
-    and (optionally) publishes a detection-overlay topic. ``marker_callback``
-    plugs straight into :meth:`mavpilot.DroneController.precision_land`.
+    ``camera_info`` topic, builds a nanofractal detector worker on the image
+    stream, and (optionally) publishes a detection-overlay topic.
+    ``marker_callback`` plugs straight into
+    :meth:`mavpilot.DroneController.precision_land`.
 
     Example::
 
-        async with GazeboArucoSource(marker_size=0.17) as src:
+        async with GazeboFractalSource(marker_size=0.17) as src:
             async with DroneController(connection_string=conn) as drone:
                 await drone.connect()
                 await drone.wait_until_ready()
@@ -213,29 +216,32 @@ class GazeboArucoSource:
         image_topic: str = DEFAULT_IMAGE_TOPIC,
         camera_info_topic: str = DEFAULT_CAMERA_INFO_TOPIC,
         marker_size: float = 0.17,
+        config: str = "FRACTAL_5L_6",
         camera_yaw_deg: float = 0.0,
         publish_viz: bool = True,
+        max_reproj_err_px: float | None = None,
         camera_info_timeout_s: float = 10.0,
     ) -> None:
         self._image_topic = image_topic
         self._camera_info_topic = camera_info_topic
         self._marker_size = marker_size
+        self._config = config
         self._camera_yaw_deg = camera_yaw_deg
         self._publish_viz = publish_viz
+        self._max_err = max_reproj_err_px
         self._camera_info_timeout_s = camera_info_timeout_s
 
         self._stream: ROS2ImageStream | None = None
-        self._detector = None
+        self._worker: FractalDetectorWorker | None = None
         self._viz: DetectionImagePublisher | None = None
         self._node = None
         self._bridge: subprocess.Popen | None = None
 
-    async def __aenter__(self) -> GazeboArucoSource:
+    async def __aenter__(self) -> GazeboFractalSource:
         import asyncio
 
+        import numpy as np  # type: ignore[import]
         import rclpy  # type: ignore[import]
-
-        from arucofractal import Config, DetectionThread  # type: ignore[import]
 
         self._bridge = await asyncio.to_thread(
             start_ros_gz_bridge,
@@ -244,7 +250,7 @@ class GazeboArucoSource:
         )
 
         rclpy.init()
-        self._node = rclpy.create_node("mavpilot_gazebo_aruco")
+        self._node = rclpy.create_node("mavpilot_gazebo_fractal")
         cam = await asyncio.to_thread(
             wait_for_camera_info,
             self._node,
@@ -253,19 +259,25 @@ class GazeboArucoSource:
         )
         log.info(f"camera {cam['width']}x{cam['height']} fx={cam['fx']:.1f}")
 
-        cfg = Config(
-            marker_size=self._marker_size,
-            camera_fx=cam["fx"],
-            camera_fy=cam["fy"],
-            camera_cx=cam["cx"],
-            camera_cy=cam["cy"],
-            frame_width=cam["width"],
-            frame_height=cam["height"],
+        K = np.array(
+            [[cam["fx"], 0, cam["cx"]], [0, cam["fy"], cam["cy"]], [0, 0, 1]],
+            dtype=np.float64,
         )
+        dist = np.zeros(5, dtype=np.float64)
+
         self._stream = ROS2ImageStream(self._node, self._image_topic)
-        self._detector = DetectionThread(self._stream, cfg)
+        self._worker = FractalDetectorWorker(
+            self._stream,
+            K,
+            dist,
+            config=self._config,
+            marker_size=self._marker_size,
+            camera_yaw_deg=self._camera_yaw_deg,
+            max_reproj_err_px=self._max_err,
+        )
+        self._worker.start()
         if self._publish_viz:
-            self._viz = DetectionImagePublisher(self._node, self._stream, self._detector)
+            self._viz = DetectionImagePublisher(self._node, self._stream, self._worker)
 
         threading.Thread(target=rclpy.spin, args=(self._node,), daemon=True).start()
         return self
@@ -273,8 +285,8 @@ class GazeboArucoSource:
     async def __aexit__(self, *_: object) -> None:
         if self._viz:
             self._viz.stop()
-        if self._detector:
-            self._detector.stop()
+        if self._worker:
+            self._worker.stop()
         if self._node:
             self._node.destroy_node()
         try:
@@ -289,6 +301,4 @@ class GazeboArucoSource:
 
     def marker_callback(self) -> MarkerObservation | None:
         """Return current marker offset in body FRD, or None if not visible."""
-        if self._detector is None:
-            return None
-        return observation_from_detection(self._detector.state, self._camera_yaw_deg)
+        return self._worker.marker_callback() if self._worker else None

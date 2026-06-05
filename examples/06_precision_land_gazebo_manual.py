@@ -1,16 +1,19 @@
 """Точная посадка: ручной полёт → OFFBOARD → precision landing (Gazebo).
 
 Сценарий:
-  1. Запустить: bash examples/run_gazebo.sh 06
+  1. Запустить: python examples/06_precision_land_gazebo_manual.py
+     (нужен ROS2: source /opt/ros/<distro>/setup.bash, и pip install nanofractal)
   2. Лететь вручную к площадке
   3. Переключить FC в OFFBOARD → скрипт берёт управление:
        поворот к landing-yaw → центровка + снижение на маркер
 
-Вся ROS2/Gazebo-обвязка живёт в mavpilot.integrations.gazebo.
+Вся ROS2/Gazebo-обвязка живёт в mavpilot.integrations.gazebo (детекция —
+mavpilot.integrations.nanofractal).
 
 Просмотр детекции:
   ros2 run rqt_image_view rqt_image_view /mavpilot/detection_image
 """
+
 from __future__ import annotations
 
 import argparse
@@ -21,7 +24,7 @@ from mavpilot import DroneController
 from mavpilot.integrations.gazebo import (
     DEFAULT_CAMERA_INFO_TOPIC,
     DEFAULT_IMAGE_TOPIC,
-    GazeboArucoSource,
+    GazeboFractalSource,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -29,7 +32,7 @@ log = logging.getLogger("drone")
 
 
 async def main_async(args) -> None:
-    source = GazeboArucoSource(
+    source = GazeboFractalSource(
         image_topic=args.image_topic,
         camera_info_topic=args.camera_info_topic,
         marker_size=args.marker_size,

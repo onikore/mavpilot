@@ -18,7 +18,7 @@ class MarkerSource(Protocol):
     Any class with a ``marker_callback()`` of the right signature satisfies
     this protocol without inheritance — plain duck typing.
 
-    This allows third-party marker detectors (e.g. arucofractal) to be used
+    This allows third-party marker detectors (e.g. nanofractal) to be used
     with :meth:`mavpilot.DroneController.precision_land` without needing to
     know about or inherit from this protocol.
 
