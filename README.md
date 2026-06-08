@@ -57,6 +57,14 @@ pip install -e ".[dev]"
 
 **Runtime dependency:** [pymavlink](https://pypi.org/project/pymavlink/) (installed automatically).
 
+**Optional extras:**
+
+```bash
+pip install "mavpilot[nanofractal]"   # fractal-ArUco marker detection for precision landing
+```
+
+The `nanofractal` extra pulls in [nanofractal](https://github.com/Onikore/nanofractal) (a pip wheel with bundled OpenCV) used by the built-in marker sources. The Gazebo source additionally needs a ROS 2 install (`source /opt/ros/<distro>/setup.bash`) and `ros-<distro>-ros-gz-bridge`.
+
 ---
 
 ## Quick start — mock mode
@@ -135,6 +143,38 @@ async def mission():
             print(f"precision_land did not land cleanly: {result.status.value}")
             print(f"final position: {result.final_position}")
 ```
+
+### Marker detection integrations
+
+`mavpilot.integrations` ships ready-made marker sources for `precision_land()`. Any object with a `marker_callback() -> MarkerObservation | None` method works (the `MarkerSource` protocol) — these just save you the wiring. The built-in sources use [nanofractal](https://github.com/Onikore/nanofractal) for fractal-ArUco detection (`pip install "mavpilot[nanofractal]"`).
+
+**USB / RTSP camera** — [`NanoFractalSource`](mavpilot/integrations/nanofractal.py):
+
+```python
+from mavpilot.integrations.nanofractal import NanoFractalSource
+
+async with NanoFractalSource(source=0, marker_size=0.17) as src:
+    async with DroneController(connection_string="udp:127.0.0.1:14540") as drone:
+        await drone.connect()
+        await drone.wait_until_ready()
+        await drone.takeoff(altitude_m=5.0)
+        await drone.precision_land(src.marker_callback)
+```
+
+**Gazebo (ROS 2)** — [`GazeboFractalSource`](mavpilot/integrations/gazebo.py) reads frames and intrinsics from the camera topics, auto-starts `ros_gz_bridge`, and publishes a detection overlay to `/mavpilot/detection_image`:
+
+```python
+from mavpilot.integrations.gazebo import GazeboFractalSource
+
+async with GazeboFractalSource(marker_size=0.17) as src:
+    async with DroneController(connection_string="udp:127.0.0.1:14540") as drone:
+        await drone.connect()
+        await drone.wait_until_ready()
+        await drone.wait_for_offboard()   # fly manually, then flip the FC to OFFBOARD
+        await drone.precision_land(src.marker_callback)
+```
+
+`wait_for_offboard()` streams hold-setpoints until the pilot switches to OFFBOARD — the companion-handoff flow where a human flies to the pad and the script takes over for the landing. Runnable scripts live in [`examples/`](examples/).
 
 ### Converting camera pixels to body offset
 
@@ -236,6 +276,7 @@ DroneController(
 | `await reconnect(timeout_s)` | Re-open the link after loss; clears watchdog/send-fault latches (re-arm + re-enter OFFBOARD after) |
 | `await apply_safe_params()` | Write recommended PX4 safety params, **verified via `PARAM_VALUE` read-back** |
 | `await wait_until_ready(timeout_s)` | Block until EKF reports LOCAL_POSITION_NED |
+| `await wait_for_offboard(poll_hz, timeout_s)` | Stream hold-setpoints until the pilot flips to OFFBOARD (companion handoff) |
 | `await takeoff(altitude_m, timeout_s)` | Arm, enter OFFBOARD, climb |
 | `await goto(x, y, z, yaw_deg, …)` | Fly to NED position |
 | `await goto_relative(dx, dy, dz, …)` | NED offset from current position |
@@ -345,6 +386,10 @@ mavpilot/
 │   ├── precision_land.py  # PrecisionLand — vision descent with altitude floor
 │   ├── safety.py          # SafetyOps — wait_until_ready
 │   └── mock.py            # MockMavConnection + in-process simulator
+├── integrations/          # optional marker sources for precision_land()
+│   ├── __init__.py        # MarkerSource protocol (duck-typed)
+│   ├── nanofractal.py     # FractalDetectorWorker, NanoFractalSource (USB/RTSP)
+│   └── gazebo.py          # GazeboFractalSource — Gazebo ROS 2 camera + gz bridge
 └── viz/                   # browser UI server (HTTP + SSE) + static ES modules
 ```
 

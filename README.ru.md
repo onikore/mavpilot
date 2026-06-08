@@ -57,6 +57,14 @@ pip install -e ".[dev]"
 
 **Зависимость времени выполнения:** [pymavlink](https://pypi.org/project/pymavlink/) (устанавливается автоматически).
 
+**Опциональные extras:**
+
+```bash
+pip install "mavpilot[nanofractal]"   # детекция фрактальных ArUco-маркеров для точной посадки
+```
+
+Extra `nanofractal` подтягивает [nanofractal](https://github.com/Onikore/nanofractal) (pip-колесо со встроенным OpenCV), который используют встроенные источники маркеров. Источнику для Gazebo дополнительно нужны установка ROS 2 (`source /opt/ros/<distro>/setup.bash`) и `ros-<distro>-ros-gz-bridge`.
+
 ---
 
 ## Быстрый старт — mock-режим
@@ -135,6 +143,38 @@ async def mission():
             print(f"precision_land не приземлился: {result.status.value}")
             print(f"финальная позиция: {result.final_position}")
 ```
+
+### Интеграции для детекции маркеров
+
+`mavpilot.integrations` содержит готовые источники маркеров для `precision_land()`. Подходит любой объект с методом `marker_callback() -> MarkerObservation | None` (протокол `MarkerSource`) — встроенные источники просто избавляют от обвязки. Они используют [nanofractal](https://github.com/Onikore/nanofractal) для детекции фрактальных ArUco-маркеров (`pip install "mavpilot[nanofractal]"`).
+
+**USB / RTSP камера** — [`NanoFractalSource`](mavpilot/integrations/nanofractal.py):
+
+```python
+from mavpilot.integrations.nanofractal import NanoFractalSource
+
+async with NanoFractalSource(source=0, marker_size=0.17) as src:
+    async with DroneController(connection_string="udp:127.0.0.1:14540") as drone:
+        await drone.connect()
+        await drone.wait_until_ready()
+        await drone.takeoff(altitude_m=5.0)
+        await drone.precision_land(src.marker_callback)
+```
+
+**Gazebo (ROS 2)** — [`GazeboFractalSource`](mavpilot/integrations/gazebo.py) читает кадры и параметры камеры из топиков, сам запускает `ros_gz_bridge` и публикует оверлей детекции в `/mavpilot/detection_image`:
+
+```python
+from mavpilot.integrations.gazebo import GazeboFractalSource
+
+async with GazeboFractalSource(marker_size=0.17) as src:
+    async with DroneController(connection_string="udp:127.0.0.1:14540") as drone:
+        await drone.connect()
+        await drone.wait_until_ready()
+        await drone.wait_for_offboard()   # летите вручную, затем переключите FC в OFFBOARD
+        await drone.precision_land(src.marker_callback)
+```
+
+`wait_for_offboard()` стримит hold-setpoints, пока пилот не переключится в OFFBOARD — сценарий передачи управления, когда человек подлетает к площадке, а скрипт берёт на себя посадку. Готовые скрипты — в [`examples/`](examples/).
 
 ### Перевод пикселей камеры в смещение в теле дрона
 
@@ -236,6 +276,7 @@ DroneController(
 | `await reconnect(timeout_s)` | Переподключиться после потери связи; сбрасывает флаги watchdog/send-fault (после — заново арм и OFFBOARD) |
 | `await apply_safe_params()` | Записать рекомендуемые параметры безопасности PX4, **с проверкой через чтение `PARAM_VALUE`** |
 | `await wait_until_ready(timeout_s)` | Ждать пока EKF не выдаст LOCAL_POSITION_NED |
+| `await wait_for_offboard(poll_hz, timeout_s)` | Стримить hold-setpoints пока пилот не переключит в OFFBOARD (передача управления) |
 | `await takeoff(altitude_m, timeout_s)` | Арм, OFFBOARD режим, набор высоты |
 | `await goto(x, y, z, yaw_deg, …)` | Лететь в точку NED |
 | `await goto_relative(dx, dy, dz, …)` | Смещение от текущей позиции NED |
@@ -345,6 +386,10 @@ mavpilot/
 │   ├── precision_land.py  # PrecisionLand — визуальный спуск с нижним порогом высоты
 │   ├── safety.py          # SafetyOps — wait_until_ready
 │   └── mock.py            # MockMavConnection + встроенный симулятор
+├── integrations/          # опциональные источники маркеров для precision_land()
+│   ├── __init__.py        # протокол MarkerSource (duck-typed)
+│   ├── nanofractal.py     # FractalDetectorWorker, NanoFractalSource (USB/RTSP)
+│   └── gazebo.py          # GazeboFractalSource — камера Gazebo ROS 2 + gz bridge
 └── viz/                   # сервер браузерного UI (HTTP + SSE) + статические ES-модули
 ```
 
