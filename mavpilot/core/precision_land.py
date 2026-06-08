@@ -17,6 +17,7 @@ from collections.abc import Callable
 from ..errors import DroneError
 from ..types import MarkerObservation, PrecisionLandResult, PrecisionLandStatus
 from ..utils import body_to_ned
+from .controllers import LateralController, PController
 
 logger = logging.getLogger("drone")
 
@@ -36,6 +37,7 @@ class PrecisionLand:
         max_horizontal_step_m: float = 1.0,
         marker_lost_timeout_s: float = 3.0,
         min_altitude_floor_m: float = 0.3,
+        lateral_controller: LateralController | None = None,
     ) -> PrecisionLandResult:
         """Vision-guided descent onto a marker.
 
@@ -63,6 +65,10 @@ class PrecisionLand:
             final_altitude_m=final_altitude_m,
             min_altitude_floor_m=min_altitude_floor_m,
         )
+
+        _ctrl = lateral_controller if lateral_controller is not None else PController(kp=lateral_p_gain)
+        _ctrl.reset()
+        dt = c.loop_period
 
         # Latch floor in NED z (negative = above ground). This is the deepest
         # the setpoint is ever commanded; only marker-locked + centered
@@ -93,14 +99,9 @@ class PrecisionLand:
                 horizontal_err = math.hypot(ned_dx, ned_dy)
                 last_centered = horizontal_err < horizontal_tolerance_m
 
-                step_x = max(
-                    -max_horizontal_step_m,
-                    min(max_horizontal_step_m, ned_dx * lateral_p_gain),
-                )
-                step_y = max(
-                    -max_horizontal_step_m,
-                    min(max_horizontal_step_m, ned_dy * lateral_p_gain),
-                )
+                raw_x, raw_y = _ctrl.update(ned_dx, ned_dy, dt)
+                step_x = max(-max_horizontal_step_m, min(max_horizontal_step_m, raw_x))
+                step_y = max(-max_horizontal_step_m, min(max_horizontal_step_m, raw_y))
                 target_x = pos.x + step_x
                 target_y = pos.y + step_y
 
