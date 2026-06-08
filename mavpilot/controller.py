@@ -19,6 +19,7 @@ from pymavlink import mavutil
 
 from .core.commands import CommandSender
 from .core.connection import MAVLinkConnection
+from .core.controllers import LateralController
 from .core.mission import MissionOps
 from .core.mock import MockMavConnection, MockSimulator
 from .core.precision_land import PrecisionLand
@@ -768,6 +769,7 @@ class DroneController:
         max_horizontal_step_m: float = 1.0,
         marker_lost_timeout_s: float = 3.0,
         min_altitude_floor_m: float = 0.3,
+        lateral_controller: LateralController | None = None,
     ) -> PrecisionLandResult:
         """Vision-guided descent onto a marker, with a hard altitude floor.
 
@@ -794,6 +796,10 @@ class DroneController:
                 floor) before falling back to plain AUTO_LAND.
             min_altitude_floor_m: Hard floor (meters above ground) below which
                 descent is only allowed with a centered marker.
+            lateral_controller: Lateral controller instance. ``None`` (default)
+                uses ``PController(kp=lateral_p_gain)``, preserving existing
+                behaviour. Pass a :class:`PIDController`, :class:`FOPIDController`,
+                or :class:`ADRCController` for alternative control laws.
 
         Returns:
             A :class:`mavpilot.PrecisionLandResult` whose ``status`` describes
@@ -813,6 +819,7 @@ class DroneController:
             max_horizontal_step_m=max_horizontal_step_m,
             marker_lost_timeout_s=marker_lost_timeout_s,
             min_altitude_floor_m=min_altitude_floor_m,
+            lateral_controller=lateral_controller,
         )
 
     async def return_to_launch(self, timeout_s: float = 120.0) -> bool:

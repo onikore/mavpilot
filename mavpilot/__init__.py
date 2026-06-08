@@ -7,9 +7,21 @@ __all__ = [
     "MarkerObservation",
     "PrecisionLandStatus",
     "PrecisionLandResult",
+    "LateralController",
+    "PController",
+    "PIDController",
+    "FOPIDController",
+    "ADRCController",
 ]
 
 from .controller import DroneController
+from .core.controllers import (
+    ADRCController,
+    FOPIDController,
+    LateralController,
+    PController,
+    PIDController,
+)
 from .errors import DroneError
 from .types import MarkerObservation, Position, PrecisionLandResult, PrecisionLandStatus
 
