@@ -72,8 +72,33 @@ class PrecisionLand:
 
         # Latch floor in NED z (negative = above ground). This is the deepest
         # the setpoint is ever commanded; only marker-locked + centered
-        # descent below floor is allowed (used at handoff).
-        floor_z = -min_altitude_floor_m
+        # descent below floor is allowed (used at handoff). The handoff fires
+        # when altitude crosses final_altitude_m, so the floor must sit STRICTLY
+        # BELOW it: otherwise the ramp stalls exactly at the handoff altitude
+        # and — because the drone hovers a few cm above its z-setpoint from
+        # position-tracking lag — altitude never actually crosses the threshold,
+        # so the drone just hovers at the floor and never hands off.
+        effective_floor_m = min(min_altitude_floor_m, final_altitude_m)
+        if effective_floor_m >= final_altitude_m:
+            effective_floor_m = max(0.05, final_altitude_m * 0.5)
+            logger.info(
+                f"final_altitude_m ({final_altitude_m:.2f} m) <= safety floor; "
+                f"lowering descent floor to {effective_floor_m:.2f} m so the "
+                f"handoff altitude stays reachable"
+            )
+        floor_z = -effective_floor_m
+
+        # Independent descent ramp. Anchoring the z-setpoint to the *live*
+        # position each tick (pos.z + rate*dt) makes the commanded error only
+        # ~rate*dt (e.g. 1 cm at 0.5 m/s & 50 Hz), so PX4's position controller
+        # crawls at a few cm/s regardless of descent_rate_mps. Instead ramp an
+        # absolute commanded altitude that LEADS the drone by up to
+        # descent_lead_m, giving PX4 a real tracking error so it descends at the
+        # requested rate. The lead is clamped to stop the setpoint running away
+        # (and lunging on recovery) if the drone ever lags; cmd_z re-inits to
+        # the live position whenever descent is interrupted.
+        descent_lead_m = max(0.4, descent_rate_mps)
+        cmd_z: float | None = None
 
         start = time.time()
         last_seen = time.time()
@@ -127,12 +152,20 @@ class PrecisionLand:
                     else:
                         # At floor but off-center — hold floor altitude, keep trying.
                         target_z = floor_z
+                        cmd_z = None  # interrupt ramp; re-init on next descent
                 else:
                     if last_centered:
+                        if cmd_z is None:
+                            cmd_z = pos.z
                         descent = descent_rate_mps * c.loop_period
-                        target_z = min(pos.z + descent, floor_z)  # never below floor
+                        # Ramp the commanded altitude down at descent_rate, but
+                        # never lead the drone by more than descent_lead_m and
+                        # never below the floor.
+                        cmd_z = min(cmd_z + descent, pos.z + descent_lead_m, floor_z)
+                        target_z = cmd_z
                     else:
                         target_z = pos.z  # hold current z while off-center
+                        cmd_z = None  # interrupt ramp; re-init on next descent
 
                 c._set_setpoint_position(target_x, target_y, target_z, yaw)
 
