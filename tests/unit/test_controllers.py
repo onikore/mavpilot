@@ -105,3 +105,53 @@ def test_fopid_fractional_integral_is_weaker_than_integer():
     sx_int, _  = fopid_int.update(1.0, 0.0, dt)
     # λ=0.5 accumulates less than λ=1 over the same input history
     assert sx_frac < sx_int
+
+
+from mavpilot.core.controllers import ADRCController
+
+
+def test_adrc_reset_clears_eso_state():
+    ctrl = ADRCController(b0=1.0, omega_obs=3.0, omega_ctrl=1.5)
+    dt = 0.1
+    for _ in range(50):
+        ctrl.update(1.0, 0.0, dt)
+    ctrl.reset()
+    fresh = ADRCController(b0=1.0, omega_obs=3.0, omega_ctrl=1.5)
+    sx1, sy1 = ctrl.update(0.5, 0.3, dt)
+    sx2, sy2 = fresh.update(0.5, 0.3, dt)
+    assert sx1 == pytest.approx(sx2)
+    assert sy1 == pytest.approx(sy2)
+
+
+def test_adrc_rejects_constant_disturbance():
+    """Simulate: e[k+1] = e[k] - u[k]*dt/tau + d*dt. ESO should cancel d.
+
+    b0 = -1/tau matches the plant sign convention: the controller output u
+    reduces the error, so the effective control gain on e_dot is -1/tau.
+    omega_obs=3.0 satisfies the forward-Euler stability bound (dt*omega_obs=0.3<1)
+    and the rule-of-thumb omega_obs = 2×omega_ctrl.
+    """
+    tau = 0.4
+    ctrl = ADRCController(b0=-1.0 / tau, omega_obs=3.0, omega_ctrl=1.5)
+    dt = 0.1
+    e = 1.0
+    disturbance = 0.15  # constant wind equivalent
+    for _ in range(300):
+        u, _ = ctrl.update(e, 0.0, dt)
+        e = e - (u / tau) * dt + disturbance * dt
+    # ADRC must drive error to near-zero despite the constant disturbance
+    assert abs(e) < 0.05
+
+
+def test_p_controller_under_same_disturbance_has_larger_ss_error():
+    """P controller should NOT fully reject a constant disturbance (baseline check)."""
+    ctrl_p = PController(kp=0.7)
+    dt = 0.1
+    tau = 0.4
+    e = 1.0
+    disturbance = 0.15
+    for _ in range(300):
+        u, _ = ctrl_p.update(e, 0.0, dt)
+        e = e - (u / tau) * dt + disturbance * dt
+    # P controller will have significant steady-state error
+    assert abs(e) > 0.05

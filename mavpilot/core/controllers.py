@@ -155,3 +155,71 @@ class FOPIDController(LateralController):
     def reset(self) -> None:
         self._x.reset()
         self._y.reset()
+
+
+class _ADRCAxis:
+    def __init__(
+        self,
+        b0: float,
+        omega_obs: float,
+        omega_ctrl: float,
+    ) -> None:
+        self.b0 = b0
+        self._l1 = 3.0 * omega_obs
+        self._l2 = 3.0 * omega_obs ** 2
+        self._l3 = omega_obs ** 3
+        self._kp = omega_ctrl ** 2
+        self._kd = 2.0 * omega_ctrl
+        self.z1 = self.z2 = self.z3 = 0.0
+        self._u_prev = 0.0
+
+    def update(self, e_meas: float, dt: float) -> float:
+        e1 = self.z1 - e_meas
+        dz1 = self.z2 - self._l1 * e1
+        dz2 = self.z3 + self.b0 * self._u_prev - self._l2 * e1
+        dz3 = -self._l3 * e1
+        self.z1 += dt * dz1
+        self.z2 += dt * dz2
+        self.z3 += dt * dz3
+        u = (-self._kp * self.z1 - self._kd * self.z2 - self.z3) / self.b0
+        self._u_prev = u
+        return u
+
+    def reset(self) -> None:
+        self.z1 = self.z2 = self.z3 = 0.0
+        self._u_prev = 0.0
+
+
+class ADRCController(LateralController):
+    """Linear Active Disturbance Rejection Controller.
+
+    Uses a 2nd-order Extended State Observer to estimate and cancel lumped
+    disturbances (wind, bias, model mismatch) without explicit measurement.
+
+    Parameters
+    ----------
+    b0:
+        Control effectiveness (maps step command to error rate change).
+        Start with 1.0 and increase if the drone under-responds.
+    omega_obs:
+        ESO bandwidth (rad/s). Higher values → faster disturbance tracking
+        but more noise sensitivity. Rule of thumb: 3–5 × omega_ctrl.
+    omega_ctrl:
+        Closed-loop bandwidth (rad/s). Higher → faster but more aggressive.
+    """
+
+    def __init__(
+        self,
+        b0: float = 1.0,
+        omega_obs: float = 3.0,
+        omega_ctrl: float = 1.0,
+    ) -> None:
+        self._x = _ADRCAxis(b0, omega_obs, omega_ctrl)
+        self._y = _ADRCAxis(b0, omega_obs, omega_ctrl)
+
+    def update(self, err_x: float, err_y: float, dt: float) -> tuple[float, float]:
+        return self._x.update(err_x, dt), self._y.update(err_y, dt)
+
+    def reset(self) -> None:
+        self._x.reset()
+        self._y.reset()
