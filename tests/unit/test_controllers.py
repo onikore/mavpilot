@@ -62,3 +62,46 @@ def test_pid_reset_clears_state():
     # After reset: integral = 0, so output = ki * e * dt = 1*1*0.1 = 0.1
     sx, _ = ctrl.update(1.0, 0.0, dt)
     assert sx == pytest.approx(0.1, rel=1e-6)
+
+
+from mavpilot.core.controllers import FOPIDController
+
+
+def test_fopid_reduces_to_pid_at_integer_orders():
+    """GL at λ=1, μ=1 must match discrete PID (alpha=1, no derivative filter)."""
+    kp, ki, kd = 0.5, 0.1, 0.05
+    pid = PIDController(kp=kp, ki=ki, kd=kd, windup_limit=100.0, derivative_alpha=1.0)
+    fopid = FOPIDController(kp=kp, ki=ki, kd=kd, lambda_order=1.0, mu_order=1.0, N=50)
+    dt = 0.1
+    errors_seq = [0.8, 0.6, 0.5, 0.4, 0.3]
+    for e in errors_seq:
+        px, _ = pid.update(e, 0.0, dt)
+        fx, _ = fopid.update(e, 0.0, dt)
+    assert px == pytest.approx(fx, rel=1e-6)
+
+
+def test_fopid_reset_clears_history():
+    ctrl = FOPIDController(kp=0.0, ki=1.0, kd=0.0, lambda_order=0.7, mu_order=0.7, N=20)
+    dt = 0.1
+    for _ in range(15):
+        ctrl.update(1.0, 0.0, dt)
+    ctrl.reset()
+    # After reset behaves identically to a fresh instance
+    fresh = FOPIDController(kp=0.0, ki=1.0, kd=0.0, lambda_order=0.7, mu_order=0.7, N=20)
+    sx1, _ = ctrl.update(1.0, 0.0, dt)
+    sx2, _ = fresh.update(1.0, 0.0, dt)
+    assert sx1 == pytest.approx(sx2, rel=1e-9)
+
+
+def test_fopid_fractional_integral_is_weaker_than_integer():
+    """Fractional integral λ<1 accumulates slower than integer integral."""
+    dt = 0.1
+    fopid_frac = FOPIDController(kp=0.0, ki=1.0, kd=0.0, lambda_order=0.5, mu_order=1.0, N=30)
+    fopid_int  = FOPIDController(kp=0.0, ki=1.0, kd=0.0, lambda_order=1.0, mu_order=1.0, N=30)
+    for _ in range(20):
+        fopid_frac.update(1.0, 0.0, dt)
+        fopid_int.update(1.0, 0.0, dt)
+    sx_frac, _ = fopid_frac.update(1.0, 0.0, dt)
+    sx_int, _  = fopid_int.update(1.0, 0.0, dt)
+    # λ=0.5 accumulates less than λ=1 over the same input history
+    assert sx_frac < sx_int
