@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections import deque
-import math
 
 
 class LateralController(ABC):
@@ -124,7 +123,10 @@ class _FOPIDAxis:
     def update(self, e: float, dt: float) -> float:
         self._buf.appendleft(e)   # buf[0] = e[n], buf[1] = e[n-1], ...
         i_frac = (dt ** self._lam) * sum(self._wi[j] * self._buf[j] for j in range(self._N))
-        d_frac = (dt ** (-self._mu)) * sum(self._wd[j] * self._buf[j] for j in range(self._N))
+        d_frac = (
+            (dt ** (-self._mu)) * sum(self._wd[j] * self._buf[j] for j in range(self._N))
+            if dt > 0 else 0.0
+        )
         return self.kp * e + self.ki * i_frac + self.kd * d_frac
 
     def reset(self) -> None:
@@ -164,6 +166,8 @@ class _ADRCAxis:
         omega_obs: float,
         omega_ctrl: float,
     ) -> None:
+        if b0 == 0.0:
+            raise ValueError("b0 must be non-zero")
         self.b0 = b0
         self._l1 = 3.0 * omega_obs
         self._l2 = 3.0 * omega_obs ** 2
@@ -199,11 +203,15 @@ class ADRCController(LateralController):
     Parameters
     ----------
     b0:
-        Control effectiveness (maps step command to error rate change).
-        Start with 1.0 and increase if the drone under-responds.
+        Control effectiveness — must match the plant's sign convention.
+        For precision-landing plants where a positive position step reduces
+        the lateral error (standard case), ``b0`` must be **negative**:
+        set ``b0 = -1 / tau`` where ``tau`` is the inner-loop time constant
+        (typically 0.3–0.5 s). Example: tau=0.4 → ``b0=-2.5``.
+        A positive ``b0`` inverts the correction and will cause divergence.
     omega_obs:
         ESO bandwidth (rad/s). Higher values → faster disturbance tracking
-        but more noise sensitivity. Rule of thumb: 3–5 × omega_ctrl.
+        but more noise sensitivity. Rule of thumb: omega_obs ≈ 3–5 × omega_ctrl.
     omega_ctrl:
         Closed-loop bandwidth (rad/s). Higher → faster but more aggressive.
     """
